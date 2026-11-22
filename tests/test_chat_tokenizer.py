@@ -26,7 +26,7 @@ class TokenizerContracts(unittest.TestCase):
         self.assertEqual(prompt[0],2)
         self.assertEqual(prompt.count(3),4)
         self.assertEqual(prompt.count(4),3)
-        self.assertEqual(prompt[-6:], [3]+[100+ord(ch) for ch in "model\n"])
+        self.assertEqual(prompt[-7:], [3]+[100+ord(ch) for ch in "model\n"])
         self.assertEqual(model.stop_ids,{1,4})
         self.assertEqual(model.decode([172,205]),"Hi")
 
