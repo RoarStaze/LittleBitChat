@@ -135,7 +135,9 @@ def _read_config_eps(root, hidden):
     try:
         payload=json.loads(config.read_text(encoding="utf8"))
         text_config=payload.get("text_config",payload)
-        eps=text_config.get("rms_norm_eps")
+        # Gemma3TextConfig defaults rms_norm_eps to 1e-6 when omitted.
+        # Preserve explicitly specified values for strict validation below.
+        eps=text_config.get("rms_norm_eps", DEFAULT_EPS)
         dim=text_config.get("hidden_size")
     except (ValueError,AttributeError,TypeError) as exc:
         raise Layer0CaptureError("Invalid config.json for lightweight capture") from exc
