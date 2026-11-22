@@ -39,6 +39,16 @@ class TrainingCLITests(unittest.TestCase):
             self.assertTrue(report['packed_inference_verified'])
             self.assertTrue(report['teacher_is_synthetic'])
 
+    def test_train_command_reaches_training_cli_through_root(self):
+        root = ROOT / 'littlebitchat.py'
+        if not root.is_file():
+            self.skipTest('Run root CLI gate in full standalone repo')
+        result = subprocess.run([sys.executable, str(root), 'train', '--help'], cwd=ROOT,
+                                capture_output=True, text=True, timeout=30)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('layer', result.stdout)
+        self.assertIn('demo', result.stdout)
+
     def test_without_teacher_checkpoint_fails_closed(self):
         p=subprocess.run([sys.executable,'-m','training.cli','layer','--checkpoint','nonexistent',
           '--layer','0','--projection','mlp.up_proj','--out','ignored'],cwd=ROOT,capture_output=True,text=True,timeout=30)
