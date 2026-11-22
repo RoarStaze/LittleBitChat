@@ -99,6 +99,24 @@ class BatchTrainingTests(unittest.TestCase):
         self.assertEqual(second["skipped_jobs"], 1)
         self.assertEqual(second["new_jobs"], 1)
 
+    def test_one_new_job_per_resume_continues_to_next_projection(self):
+        first = run_batch(**self._kwargs(max_jobs=1))
+        self.assertEqual(first["new_jobs"], 1)
+        second = run_batch(**self._kwargs(resume=True, max_jobs=1))
+        self.assertEqual(second["new_jobs"], 1)
+        self.assertEqual(second["skipped_jobs"], 1)
+        self.assertEqual(second["completed_jobs"], 2)
+
+    def test_changed_original_teacher_tensor_is_detected_on_resume(self):
+        run_batch(**self._kwargs(max_jobs=1))
+        shard = self.source / "model-00001.safetensors"
+        changed = dict(self.weights)
+        changed[BASE + "self_attn.q_proj.weight"] = changed[
+            BASE + "self_attn.q_proj.weight"].float().add(.01).bfloat16()
+        save_file(changed, str(shard))
+        with self.assertRaisesRegex(BatchTrainingError, "teacher|changed"):
+            run_batch(**self._kwargs(resume=True, max_jobs=1))
+
     def test_resume_detects_corrupted_packed_tensor(self):
         run_batch(**self._kwargs(max_jobs=1))
         artifact = next(self.out.glob("*.safetensors"))
