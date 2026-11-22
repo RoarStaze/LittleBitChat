@@ -154,14 +154,22 @@ class LittleBitQAT(nn.Module):
         return y
 
     @torch.no_grad()
+    def dense_path_weight(self, suffix=""):
+        """Materialize ONE signed path for bounded teacher calibration only."""
+        if suffix not in ("", "_R") or (suffix == "_R" and not self.residual):
+            raise TrainingError("Invalid signed path suffix")
+        U, V = getattr(self, 'U'+suffix), getattr(self, 'V'+suffix)
+        u1, u2, v1, v2 = [
+            getattr(self, name+suffix) for name in ('u1','u2','v1','v2')
+        ]
+        return ((SmoothSign.apply(U) * (u1[:,None]*u2[None,:])) @
+                (SmoothSign.apply(V) * (v1[:,None]*v2[None,:])))
+
+    @torch.no_grad()
     def dense_weight(self):
-        """Only for training a single bounded teacher matrix, never inference."""
-        def path(suffix):
-            U,V=getattr(self,'U'+suffix),getattr(self,'V'+suffix)
-            u1,u2,v1,v2=[getattr(self,name+suffix) for name in ('u1','u2','v1','v2')]
-            return (SmoothSign.apply(U) * (u1[:,None]*u2[None,:])) @ (SmoothSign.apply(V) * (v1[:,None]*v2[None,:]))
-        result=path('')
-        return result+path('_R') if self.residual else result
+        """Only for training one bounded teacher matrix, never inference."""
+        result = self.dense_path_weight("")
+        return result + self.dense_path_weight("_R") if self.residual else result
 
 
 def _teacher_sha(weight):
@@ -181,7 +189,8 @@ def _save_state(path, payload):
 
 def train_one(weight, *, rank, steps=100, batch_size=32, lr=0.002,
               itq_iterations=20, residual=True, seed=42, device='cpu',
-              save_state=None, resume=False, checkpoint_every=25):
+              save_state=None, resume=False, checkpoint_every=25,
+              refine_output_scales=False):
     """QAT ONE projection against a frozen dense teacher on random probes.
 
     NOT full-LLM QAT and cannot independently create a conversational model.
@@ -192,6 +201,8 @@ def train_one(weight, *, rank, steps=100, batch_size=32, lr=0.002,
         raise TrainingError('batch_size outside 1..4096')
     if type(checkpoint_every) is not int or not 1<=checkpoint_every<=10000:
         raise TrainingError('checkpoint_every outside 1..10000')
+    if type(refine_output_scales) is not bool:
+        raise TrainingError('refine_output_scales must be boolean')
     if type(lr) not in (int,float) or not math.isfinite(lr) or not 0<lr<=1:
         raise TrainingError('Invalid learning rate')
     if device not in ('cpu','cuda') or (device=='cuda' and not torch.cuda.is_available()):
@@ -207,7 +218,8 @@ def train_one(weight, *, rank, steps=100, batch_size=32, lr=0.002,
         if (data.get('teacher_sha256')!=digest or data.get('rank')!=rank or
             data.get('seed')!=seed or data.get('residual')!=residual or
             data.get('itq_iterations')!=itq_iterations or data.get('batch_size')!=batch_size or
-            data.get('lr')!=lr):
+            data.get('lr')!=lr or
+            data.get('refine_output_scales', False)!=refine_output_scales):
             raise TrainingError('Resume state training/teacher mismatch')
         resumed=data['step']
         if type(resumed) is not int or steps<=resumed:
@@ -219,6 +231,9 @@ def train_one(weight, *, rank, steps=100, batch_size=32, lr=0.002,
     else:
         model=LittleBitQAT.from_teacher(teacher,rank=rank,itq_iterations=itq_iterations,
                                         residual=residual,seed=seed).to(device)
+        if refine_output_scales:
+            from .scale_refinement import refine_output_row_scales
+            refine_output_row_scales(model, teacher)
     opt=torch.optim.AdamW(model.parameters(),lr=lr,weight_decay=0.)
     if resume:
         opt.load_state_dict(data['optimizer'])
@@ -286,6 +301,7 @@ def train_one(weight, *, rank, steps=100, batch_size=32, lr=0.002,
                 _save_state(checkpoint, {'version':2,'step':at,'teacher_sha256':digest,
                     'rank':rank,'seed':seed,'residual':residual,
                     'itq_iterations':itq_iterations,'batch_size':batch_size,'lr':lr,
+                    'refine_output_scales': refine_output_scales,
                     'model':model.state_dict(),'optimizer':opt.state_dict(),
                     'best_model':best_snapshot,'best_step':best_step,
                     'best_validation_rmse':best_validation_rmse,
@@ -306,6 +322,7 @@ def train_one(weight, *, rank, steps=100, batch_size=32, lr=0.002,
             'holdout_nrmse':rmse/max(denom,1e-12),
             'holdout_error_regressed':rmse > original_audit_rmse,
             'teacher_sha256':digest,
+            'refine_output_scales': refine_output_scales,
             'rank':rank,'actual_effective_bits':estimated_effective_bits(*teacher.shape,rank,residual),
             'checkpoint':str(checkpoint) if checkpoint else None,
             'method':'layerwise_random_probe_qat_not_full_model_training'}

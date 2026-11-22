@@ -178,8 +178,8 @@ def _write_atomic(path, payload):
 def _settings(source, layer_start, layer_end, projections, *, rank, steps,
               batch_size, lr, itq_iterations, seed, device, residual,
               max_teacher_mib, checkpoint_every, max_holdout_nrmse,
-              allow_test_shapes):
-    return {
+              allow_test_shapes, refine_output_scales=False):
+    result = {
         "source": str(Path(source).resolve()), "layer_start": layer_start,
         "layer_end": layer_end, "projections": list(projections),
         "rank": rank, "steps": steps, "batch_size": batch_size, "lr": lr,
@@ -189,6 +189,10 @@ def _settings(source, layer_start, layer_end, projections, *, rank, steps,
         "max_holdout_nrmse": max_holdout_nrmse,
         "allow_test_shapes": allow_test_shapes,
     }
+    # Keep old default-mode manifests resumable, including pre-feature jobs.
+    if refine_output_scales:
+        result["refine_output_scales"] = True
+    return result
 
 
 def _resume_audit(record, entry, out, source, settings):
@@ -210,6 +214,8 @@ def _resume_audit(record, entry, out, source, settings):
     if (audit.get("teacher_sha256") != record.get("teacher_sha256")
             or audit.get("rank") != record.get("rank")
             or audit.get("packed_file") != str(expected)
+            or audit.get("refine_output_scales", False) != settings.get("refine_output_scales", False)
+            or record.get("refine_output_scales", False) != settings.get("refine_output_scales", False)
             or not audit.get("packed_inference_verified")):
         raise BatchTrainingError("Resume audit does not match checkpoint manifest: " + stem)
     # Verify original dense teacher has not changed. This is intentionally
@@ -245,7 +251,8 @@ def run_batch(*, source, out, layer_start=0, layer_end=62,
               projections=PROJECTIONS, rank=None, steps=50, batch_size=16,
               lr=0.002, itq_iterations=20, seed=42, device="cpu", residual=True,
               max_teacher_mib=512, checkpoint_every=10, max_jobs=1,
-              max_holdout_nrmse=0.25, allow_test_shapes=False, resume=False):
+              max_holdout_nrmse=0.25, allow_test_shapes=False, resume=False,
+              refine_output_scales=False):
     """Sequential train/verify/export with a durable checksummed progress file.
 
     Safe by default: at most one job per invocation, one teacher projection
@@ -258,7 +265,8 @@ def run_batch(*, source, out, layer_start=0, layer_end=62,
             or not math.isfinite(max_holdout_nrmse)
             or not 0 < max_holdout_nrmse <= 10):
         raise BatchTrainingError("Invalid quality gate max_holdout_nrmse")
-    if type(resume) is not bool or type(allow_test_shapes) is not bool:
+    if (type(resume) is not bool or type(allow_test_shapes) is not bool
+            or type(refine_output_scales) is not bool):
         raise BatchTrainingError("Invalid boolean batch setting")
     projections = _validate_selection(layer_start, layer_end, projections)
     selected = _read_inventory(source, layer_start, layer_end, projections,
@@ -269,7 +277,8 @@ def run_batch(*, source, out, layer_start=0, layer_end=62,
                        residual=residual, max_teacher_mib=max_teacher_mib,
                        checkpoint_every=checkpoint_every,
                        max_holdout_nrmse=max_holdout_nrmse,
-                       allow_test_shapes=allow_test_shapes)
+                       allow_test_shapes=allow_test_shapes,
+                       refine_output_scales=refine_output_scales)
     raw_out = Path(out)
     if raw_out.is_symlink():
         raise BatchTrainingError("Refusing output directory symlink")
@@ -317,6 +326,7 @@ def run_batch(*, source, out, layer_start=0, layer_end=62,
             seed=seed, device=device, no_residual=not residual,
             max_teacher_mib=max_teacher_mib, checkpoint_every=checkpoint_every,
             resume=(resume and state.is_file()),
+            refine_output_scales=refine_output_scales,
         )
         print("Training " + key + " (new " + str(new + 1) + "/" + str(min(max_jobs, len(selected))) + ")",
               file=sys.stderr, flush=True)

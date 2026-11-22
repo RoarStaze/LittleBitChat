@@ -31,6 +31,8 @@ def parser():
         p.add_argument('--seed',type=int,default=42)
         p.add_argument('--device',choices=('cpu','cuda'),default='cpu')
         p.add_argument('--no-residual',action='store_true')
+        p.add_argument('--refine-output-scales',action='store_true',
+                       help='Fit binary output-row magnitude scales to teacher before QAT')
         p.add_argument('--resume',action='store_true')
         p.add_argument('--checkpoint-every',type=int,default=10)
         if mode=='layer':
@@ -62,6 +64,8 @@ def parser():
                            help="Independent Gaussian probes; 96 matches the trainer audit count")
     diagnosis.add_argument("--max-teacher-mib", type=int, default=512)
     diagnosis.add_argument("--no-residual", action="store_true")
+    diagnosis.add_argument("--refine-output-scales", action="store_true",
+                           help="Compare original and joint row-calibrated binary factors")
 
     preview = commands.add_parser("rank-plan",
         help="Preview physical BPW for different factor ranks without training or loading weights")
@@ -98,6 +102,8 @@ def parser():
             q.add_argument("--seed", type=int, default=42)
             q.add_argument("--device", choices=("cpu", "cuda"), default="cpu")
             q.add_argument("--no-residual", action="store_true")
+            q.add_argument("--refine-output-scales", action="store_true",
+                           help="Calibrate binary row scales before new QAT jobs")
             q.add_argument("--checkpoint-every", type=int, default=10)
             q.add_argument("--max-jobs", type=int, default=1,
                            help="Maximum selected projections processed this invocation (default 1)")
@@ -133,7 +139,8 @@ def run(args):
     result=train_one(teacher,rank=rank,steps=args.steps,batch_size=args.batch_size,
                      lr=args.lr,itq_iterations=args.itq_iterations,seed=args.seed,
                      residual=not args.no_residual,device=args.device,
-                     save_state=state,resume=args.resume,checkpoint_every=args.checkpoint_every)
+                     save_state=state,resume=args.resume,checkpoint_every=args.checkpoint_every,
+                     refine_output_scales=args.refine_output_scales)
     model=result.pop('model')
     prefix=f'{PREFIX}.{layer}.{projection}'
     save_export(model,output,prefix)
@@ -166,7 +173,8 @@ def main(argv=None):
                 args.checkpoint, layer=args.layer, projection=args.projection,
                 rank=args.rank, seed=args.seed, itq_iterations=args.itq_iterations,
                 residual=not args.no_residual, probe_count=args.samples,
-                max_teacher_mib=args.max_teacher_mib)
+                max_teacher_mib=args.max_teacher_mib,
+                refine_output_scales=args.refine_output_scales)
             print(json.dumps(report, indent=2))
         elif args.mode == "rank-plan":
             from .rank_plan import build_rank_plan
@@ -201,6 +209,7 @@ def main(argv=None):
                                    lr=args.lr, itq_iterations=args.itq_iterations,
                                    seed=args.seed, device=args.device,
                                    residual=not args.no_residual,
+                                   refine_output_scales=args.refine_output_scales,
                                    checkpoint_every=args.checkpoint_every,
                                    max_jobs=args.max_jobs,
                                    max_holdout_nrmse=args.max_holdout_nrmse,

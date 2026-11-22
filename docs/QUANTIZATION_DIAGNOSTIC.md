@@ -34,3 +34,54 @@ Important: This is PyTorch's *randomized* SVD approximation, not the mathematica
 The tool does not download more shards, write an output file, retrain, change checkpoints, or make a chatbot. It performs potentially expensive CPU calculations on the 4096x5376 real teacher projection; start at rank 128 rather than the much larger target rank 623.
 
 Use its measured breakdown to prioritize representation rank versus binary quantization improvements. To ultimately run a good 27B chat model we still need calibration on actual model activations, trained full-model factors and a complete evaluated checkpoint.
+
+
+## Fixed-BPW binary output-row refinement (opt-in)
+
+The new `--refine-output-scales` mode fits the existing `u1` and optional
+`u1_R` row-scale vectors **jointly**, at fixed sign patterns, factor rank,
+and packed storage cost. For each output row it solves nonnegative 2-variable
+least squares against the original dense projection, considering the interior,
+single-path boundaries, zero, and unchanged baseline. It restores the
+original scales if FP32 reconstruction numerically regresses.
+
+Compare the previous initialization with the refined version, without
+training or changing the checkpoint:
+
+```powershell
+cd "$HOME\Desktop\LittleBitChat"
+git pull --ff-only origin main
+$py = "$HOME\Desktop\LittleBit-CUDA-venv\Scripts\python.exe"
+& $py littlebitchat.py train diagnose `
+  --checkpoint models\gemma-3-27b-it `
+  --layer 0 `
+  --projection self_attn.q_proj `
+  --rank 622 `
+  --itq-iterations 20 `
+  --samples 96 `
+  --refine-output-scales
+```
+
+The `binary_initial_*` metrics remain the unchanged baseline, and
+`binary_refined_*` metrics report the recalibrated factors. Diagnostic
+Gaussian probes are **not** used to select scales; the dense teacher is.
+A lower dense-weight RMSE does not guarantee lower independent probe NRMSE
+or better language quality. This option adds CPU/GPU work but no stored bits.
+
+To use the improved initialization in a **new** QAT job (fresh output path):
+
+```powershell
+& $py littlebitchat.py train batch `
+  --checkpoint models\gemma-3-27b-it `
+  --layer-start 0 --layer-end 1 `
+  --projections self_attn.q_proj `
+  --rank 128 --steps 200 --device cpu --max-jobs 1 `
+  --refine-output-scales --out training_runs\gemma-row-refined
+```
+
+The flag also works with `train layer` and `train demo`. It is deliberately
+opt-in to preserve established runs. Training state records the policy and
+refuses a resume if the flag changes; batch manifests also record it when
+enabled. Do not claim a trained full model or language improvement from
+single-layer reconstruction metrics. The official teacher's provenance must
+still be verified independently.
