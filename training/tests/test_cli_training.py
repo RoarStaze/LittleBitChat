@@ -39,6 +39,24 @@ class TrainingCLITests(unittest.TestCase):
             self.assertTrue(report['packed_inference_verified'])
             self.assertTrue(report['teacher_is_synthetic'])
 
+    def test_demo_with_enhanced_foundation_exports_packed_factors(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            p = subprocess.run(
+                [sys.executable, '-m', 'training.cli', 'demo', '--out', tmp,
+                 '--steps', '3', '--rank', '5', '--device', 'cpu',
+                 '--itq-iterations', '2', '--svd-oversample', '4',
+                 '--svd-power-iters', '4', '--binary-refine-channels', '3',
+                 '--binary-refine-passes', '2', '--refine-output-scales'],
+                cwd=ROOT, capture_output=True, text=True, timeout=120)
+            self.assertEqual(p.returncode, 0, p.stderr)
+            report = json.loads(p.stdout)
+            self.assertTrue(report['packed_inference_verified'])
+            self.assertEqual(report['svd_oversample'], 4)
+            self.assertEqual(report['svd_power_iters'], 4)
+            self.assertEqual(report['binary_refine_channels'], 3)
+            self.assertEqual(report['binary_refine_passes'], 2)
+            self.assertFalse(report['validated_language_quality'])
+
     def test_train_command_reaches_training_cli_through_root(self):
         root = ROOT / 'littlebitchat.py'
         if not root.is_file():
