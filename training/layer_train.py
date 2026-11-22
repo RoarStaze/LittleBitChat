@@ -198,8 +198,6 @@ def train_one(weight, *, rank, steps=100, batch_size=32, lr=0.002,
         raise TrainingError('Requested PyTorch device is unavailable')
     teacher=weight.detach().float().to(device)
     digest=_teacher_sha(weight)
-    model=LittleBitQAT.from_teacher(teacher,rank=rank,itq_iterations=itq_iterations,residual=residual,seed=seed).to(device)
-    opt=torch.optim.AdamW(model.parameters(),lr=lr,weight_decay=0.)
     checkpoint=Path(save_state) if save_state else None
     resumed=0
     if resume:
@@ -211,11 +209,19 @@ def train_one(weight, *, rank, steps=100, batch_size=32, lr=0.002,
             data.get('itq_iterations')!=itq_iterations or data.get('batch_size')!=batch_size or
             data.get('lr')!=lr):
             raise TrainingError('Resume state training/teacher mismatch')
-        model.load_state_dict(data['model'])
-        opt.load_state_dict(data['optimizer'])
         resumed=data['step']
-        if steps<=resumed:
+        if type(resumed) is not int or steps<=resumed:
             raise TrainingError('Requested steps must exceed checkpoint step')
+        # Reuse already-trained factors and optimizer; no expensive SVD rerun.
+        # Only load saved states created by this project (weights_only=True).
+        model=LittleBitQAT(data['model']).to(device)
+        model.load_state_dict(data['model'])
+    else:
+        model=LittleBitQAT.from_teacher(teacher,rank=rank,itq_iterations=itq_iterations,
+                                        residual=residual,seed=seed).to(device)
+    opt=torch.optim.AdamW(model.parameters(),lr=lr,weight_decay=0.)
+    if resume:
+        opt.load_state_dict(data['optimizer'])
     gen=torch.Generator(device='cpu').manual_seed(seed+10001)
     hold_gen=torch.Generator(device='cpu').manual_seed(seed+8891)
     holdout=torch.randn(96,weight.shape[1],generator=hold_gen).to(device)
