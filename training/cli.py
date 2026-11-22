@@ -82,6 +82,24 @@ def parser():
                            help="Compare original and joint row-calibrated binary factors")
 
 
+    capture = commands.add_parser(
+        "capture-activations",
+        help="Explicitly load COMPLETE original Gemma 3 checkpoint and capture real "
+             "projection inputs via PyTorch forward-pre-hooks (high host RAM)")
+    capture.add_argument("--checkpoint", type=Path, required=True)
+    capture.add_argument("--calibration-texts", type=Path, required=True)
+    capture.add_argument("--selection-texts", type=Path, required=True)
+    capture.add_argument("--audit-texts", type=Path, required=True)
+    capture.add_argument("--layer", type=int, required=True)
+    capture.add_argument("--projection", choices=PROJECTIONS, required=True)
+    capture.add_argument("--out", type=Path, required=True)
+    capture.add_argument("--max-tokens", type=int, default=128)
+    capture.add_argument("--max-rows", type=int, default=512)
+    capture.add_argument("--max-teacher-mib", type=int, default=512)
+    capture.add_argument("--confirm-full-model-memory", action="store_true",
+                         help="Required acknowledgement that full original 27B model "
+                              "loading may exceed laptop RAM")
+
     activation = commands.add_parser(
         "activation-calibrate",
         help="Calibrate existing LittleBit output-row scales with explicitly captured "
@@ -328,6 +346,9 @@ def main(argv=None):
                 svd_oversample=args.svd_oversample,
                 svd_power_iters=args.svd_power_iters)
             print(json.dumps(report, indent=2))
+        elif args.mode == "capture-activations":
+            from .capture_cli import run_capture
+            print(json.dumps(run_capture(args), indent=2))
         elif args.mode == "activation-calibrate":
             print(json.dumps(run_activation_calibration(args), indent=2))
         elif args.mode == "rank-plan":
