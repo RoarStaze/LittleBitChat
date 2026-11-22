@@ -84,12 +84,25 @@ def load_activation_bundle(source, teacher, *, layer, projection, max_mib=256):
                 "layer": str(layer),
                 "projection": projection,
                 "input_module": f"language_model.model.layers.{layer}.{projection}",
-                "capture_method": "forward_pre_hook",
                 "split_method": "disjoint_prompts",
             }
             for key, value in expected.items():
                 if metadata.get(key) != value:
                     raise ActivationDataError("Activation provenance/binding mismatch: "+key)
+            method = metadata.get("capture_method")
+            if method == "forward_pre_hook":
+                pass
+            elif method == "gemma3_layer0_embedding_rmsnorm":
+                if (layer != 0 or projection not in (
+                        "self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj")
+                        or metadata.get("embedding_tensor") != (
+                            "language_model.model.embed_tokens.weight")
+                        or metadata.get("normalization_tensor") != (
+                            "language_model.model.layers.0.input_layernorm.weight")):
+                    raise ActivationDataError(
+                        "Invalid lightweight layer-0 capture provenance")
+            else:
+                raise ActivationDataError("Unsupported activation capture_method/provenance")
             if not metadata.get("source_model", "").strip():
                 raise ActivationDataError("Activation provenance missing source_model")
             split_hashes = []
