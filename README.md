@@ -1,5 +1,28 @@
 # LittleBitChat
 
+
+## Train your own LittleBit-2 factors
+
+**New:** LittleBitChat now contains a **real learnable LittleBit-2 training pipeline**. It can train a single binary low-rank projection, use SVD + Joint-ITQ initialization, run SmoothSign quantization-aware updates, resume from the local optimizer checkpoint, and export a signed packed Safetensors tensor that the inference math can reproduce. See [Training documentation](docs/LITTLEBIT2_TRAINING.md) for the full instructions and limitations.
+
+The **first command works without any pretrained checkpoint** by training against a tiny synthetic teacher. This proves factor training and export, but cannot give the model language knowledge.
+
+~~~powershell
+cd "$HOME\Desktop\LittleBitChat"
+git pull --ff-only origin main
+$py = "$HOME\Desktop\LittleBit-CUDA-venv\Scripts\python.exe"
+& $py -m pip install -r requirements-training.txt
+& $py littlebitchat.py train demo --steps 50 --rank 8 --device cpu --out training_runs\demo
+~~~
+
+To train against **real learned Gemma 3 knowledge** instead, obtain the original pretrained dense Gemma 3 weights legally and use the layer command. Unlike the original full-model Samsung trainer, this pipeline reads only one dense projection per job:
+
+~~~powershell
+& $py littlebitchat.py train layer --checkpoint "D:\Models\gemma-3-27b-it" --layer 0 --projection self_attn.q_proj --rank 32 --itq-iterations 20 --steps 50 --device cpu --out training_runs\real-gemma-layer
+~~~
+
+**Not complete:** This does not yet compress/assemble every one of Gemma 3 27B's 434 projection modules, use true calibration activations, perform full-model distillation or create coherent chat responses. It is a genuine **single-layer** training foundation, not a completed 27B checkpoint. No cloud charges, checkpoint downloads or KalshiEdge changes.
+
 Standalone local inference research for **Samsung LittleBit/LittleBit-2 + Gemma 3 27B**, targeting **Windows 11, RTX 4050 (6 GB VRAM), and 16 GB system RAM**.
 
 **Current status:** The migrated packed CUDA engine and tiny synthetic checkpoints previously passed **160 tests on the RTX 4050** in the KalshiEdge lab. This standalone repository adds an **experimental** 62-layer streaming scheduler, a real tokenizer interface, out-of-core embedding reads, and a chat CLI. **No trained, quality-validated Gemma 3 27B LittleBit-2 checkpoint is included or confirmed available.** Full 27B text inference has NOT been validated. Without trained weights, the chat command refuses to generate fabricated replies.
