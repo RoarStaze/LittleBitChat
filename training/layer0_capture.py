@@ -186,7 +186,8 @@ def gemma3_layer0_qkv_inputs(token_ids, embedding_rows, norm, *, eps=DEFAULT_EPS
 def capture_layer0_from_original_weights(
         checkpoint, *, out, projection="self_attn.q_proj", layer=0,
         tokenizer, prompts, max_rows=512, max_tokens=128,
-        allow_test_shapes=False, max_teacher_mib=512):
+        allow_test_shapes=False, max_teacher_mib=512,
+        token_disjoint=False, min_unique_tokens=64, token_split_seed=42):
     """Build a provenance-labeled 3-way activation bundle without full-model RAM.
 
     `tokenizer` must implement encode_conversation([('user', prompt)]).
@@ -199,6 +200,8 @@ def capture_layer0_from_original_weights(
         raise Layer0CaptureError("max_tokens must be 16..512")
     if type(allow_test_shapes) is not bool:
         raise Layer0CaptureError("allow_test_shapes must be boolean")
+    if type(token_disjoint) is not bool:
+        raise Layer0CaptureError("token_disjoint must be boolean")
     output=Path(out)
     if output.exists() or output.is_symlink():
         raise Layer0CaptureError("Capture file already exists or is unsafe")
@@ -231,6 +234,18 @@ def capture_layer0_from_original_weights(
             (projection=="self_attn.q_proj" and projection_shape != [4096,5376])):
         raise Layer0CaptureError("Unexpected real Gemma 3 27B tensor shapes")
 
+    token_plan=None
+    if token_disjoint:
+        # Plan the token-ID holdout before allocating the teacher matrix.
+        from .token_disjoint import select_token_disjoint_ids, TokenDisjointError
+        try:
+            token_plan=select_token_disjoint_ids(
+                tokenizer,prompts,max_tokens=max_tokens,max_rows=max_rows,
+                min_unique_tokens=min_unique_tokens,
+                vocab_size=embedding_shape[0],seed=token_split_seed)
+        except TokenDisjointError as exc:
+            raise Layer0CaptureError("Token-disjoint capture refused: "+str(exc)) from exc
+
     eps,config_verified=_read_config_eps(root,norm_shape[0])
     teacher=load_projection(root,layer=0,projection=projection,
                             max_teacher_mib=max_teacher_mib)
@@ -250,35 +265,53 @@ def capture_layer0_from_original_weights(
 
     captured={}
     cache={}
+    token_arrays={}
     with safe_open(str(embed_path),framework="pt",device="cpu") as opened:
         embedding_slice=opened.get_slice(EMBED)
         if list(embedding_slice.get_shape())!=embedding_shape:
             raise Layer0CaptureError("Original embedding shape changed")
-        for name in ("calibration","selection","audit"):
-            collected=[]
-            count=0
-            for prompt in prompts[name]:
-                if count>=max_rows:
-                    break
-                ids=list(tokenizer.encode_conversation([("user",prompt)]))[:max_tokens]
-                if not ids or any(type(x) is not int or not 0<=x<embedding_shape[0] for x in ids):
-                    raise Layer0CaptureError("Tokenizer produced invalid embedding token IDs")
-                for idx in set(ids):
+        if token_plan is not None:
+            # Exactly one sampled row per unique token ID; no repeated
+            # special/prefix tokens or other token-ID overlap across splits.
+            for name in ("calibration","selection","audit"):
+                ids=token_plan["ids"][name]
+                for idx in ids:
                     if idx not in cache:
                         cache[idx]=embedding_slice[idx:idx+1].clone()[0]
-                rows=torch.stack([cache[idx] for idx in ids[:max_rows-count]],dim=0)
-                capture=gemma3_layer0_qkv_inputs(ids[:len(rows)],rows,norm,eps=eps)
-                collected.append(capture)
-                count+=len(capture)
-            if count<16:
-                raise Layer0CaptureError(name+" contains fewer than 16 captured activations")
-            captured[name]=torch.cat(collected,dim=0).float().contiguous()
+                rows=torch.stack([cache[idx] for idx in ids],dim=0)
+                captured[name]=gemma3_layer0_qkv_inputs(
+                    ids,rows,norm,eps=eps).float().contiguous()
+                token_arrays["token_ids_"+name]=torch.tensor(ids,dtype=torch.int64)
+        else:
+            # Preserve the original prompt-disjoint format for compatibility.
+            for name in ("calibration","selection","audit"):
+                collected=[]
+                count=0
+                for prompt in prompts[name]:
+                    if count>=max_rows:
+                        break
+                    ids=list(tokenizer.encode_conversation([("user",prompt)]))[:max_tokens]
+                    if not ids or any(type(x) is not int or not 0<=x<embedding_shape[0] for x in ids):
+                        raise Layer0CaptureError("Tokenizer produced invalid embedding token IDs")
+                    for idx in set(ids):
+                        if idx not in cache:
+                            cache[idx]=embedding_slice[idx:idx+1].clone()[0]
+                    rows=torch.stack([cache[idx] for idx in ids[:max_rows-count]],dim=0)
+                    capture=gemma3_layer0_qkv_inputs(ids[:len(rows)],rows,norm,eps=eps)
+                    collected.append(capture)
+                    count+=len(capture)
+                if count<16:
+                    raise Layer0CaptureError(name+" contains fewer than 16 captured activations")
+                captured[name]=torch.cat(collected,dim=0).float().contiguous()
 
     from .activation_calibration import _sample_hashes
     samples={name:_sample_hashes(values) for name,values in captured.items()}
     for left,right in (("calibration","selection"),("calibration","audit"),
                        ("selection","audit")):
-        if samples[left].issubset(samples[right]) or samples[right].issubset(samples[left]):
+        if token_plan is not None:
+            if samples[left] & samples[right]:
+                raise Layer0CaptureError("Duplicate activation rows across token-disjoint splits")
+        elif samples[left].issubset(samples[right]) or samples[right].issubset(samples[left]):
             raise Layer0CaptureError("Whole activation split overlap: "+left+"/"+right)
     meta={
         "teacher_sha256":_teacher_sha(teacher),
@@ -286,7 +319,7 @@ def capture_layer0_from_original_weights(
         "projection":projection,
         "input_module":ATTN+projection,
         "capture_method":"gemma3_layer0_embedding_rmsnorm",
-        "split_method":"disjoint_prompts",
+        "split_method":"disjoint_token_ids_v1" if token_plan is not None else "disjoint_prompts",
         "source_model":str(root.resolve()),
         "rms_norm_eps":str(eps),
         "config_present_and_checked":str(config_verified).lower(),
@@ -296,10 +329,18 @@ def capture_layer0_from_original_weights(
         "selection_text_sha256":hashes["selection"],
         "audit_text_sha256":hashes["audit"],
     }
+    if token_plan is not None:
+        meta.update({
+            "token_id_selection_algorithm":token_plan["selection_algorithm"],
+            "token_split_seed":str(token_split_seed),
+            "min_unique_tokens":str(min_unique_tokens),
+            "shared_token_ids_dropped":str(token_plan["shared_dropped"]),
+        })
     output.parent.mkdir(parents=True,exist_ok=True)
-    save_file(captured,str(output),metadata=meta)
-    return {
-        "status":"LAYER0_EXACT_EMBED_NORM_CAPTURE",
+    save_file({**captured, **token_arrays},str(output),metadata=meta)
+    report={
+        "status":"LAYER0_TOKEN_DISJOINT_CAPTURE" if token_plan is not None
+                 else "LAYER0_EXACT_EMBED_NORM_CAPTURE",
         "file":str(output),
         "layer":0,
         "projection":projection,
@@ -313,4 +354,15 @@ def capture_layer0_from_original_weights(
         "config_present_and_checked":config_verified,
         "provenance_independently_verified":False,
         "training_was_run":False,
+        "token_disjoint_verified":bool(token_plan is not None),
     }
+    if token_plan is not None:
+        report.update({
+            "shared_token_ids_dropped":token_plan["shared_dropped"],
+            "source_unique_token_counts":token_plan["source_unique_counts"],
+            "eligible_unique_token_counts":token_plan["eligible_unique_counts"],
+            "unique_token_counts":token_plan["sampled_unique_counts"],
+            "min_unique_tokens":min_unique_tokens,
+            "token_id_selection_algorithm":token_plan["selection_algorithm"],
+        })
+    return report
