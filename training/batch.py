@@ -214,6 +214,8 @@ def _resume_audit(record, entry, out, source, settings):
     if (audit.get("teacher_sha256") != record.get("teacher_sha256")
             or audit.get("rank") != record.get("rank")
             or audit.get("packed_file") != str(expected)
+            or audit.get("refine_output_scales", False) != settings.get("refine_output_scales", False)
+            or record.get("refine_output_scales", False) != settings.get("refine_output_scales", False)
             or not audit.get("packed_inference_verified")):
         raise BatchTrainingError("Resume audit does not match checkpoint manifest: " + stem)
     # Verify original dense teacher has not changed. This is intentionally
