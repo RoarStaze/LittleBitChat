@@ -74,12 +74,12 @@ class QuantizationDiagnosisTests(unittest.TestCase):
         self.assertEqual(improved["teacher_sha256"], baseline["teacher_sha256"])
         self.assertAlmostEqual(improved["binary_initial_relative_weight_rmse"],
                                baseline["binary_initial_relative_weight_rmse"], places=6)
-        self.assertLessEqual(improved["binary_binary_refined_relative_weight_rmse"],
+        self.assertLessEqual(improved["binary_sign_refined_relative_weight_rmse"],
                              improved["binary_refined_relative_weight_rmse"] + 1e-6)
         self.assertEqual(improved["quantization_bpw"], baseline["quantization_bpw"])
         self.assertEqual(improved["binary_refine_channels"], 3)
         self.assertEqual(improved["binary_refine_details"]["examined_channels"], 3)
-        self.assertIsNotNone(improved["binary_binary_refined_random_probe_nrmse"])
+        self.assertIsNotNone(improved["binary_sign_refined_random_probe_nrmse"])
         self.assertFalse(improved["training_was_run"])
 
     def test_refinement_option_must_be_boolean(self):
