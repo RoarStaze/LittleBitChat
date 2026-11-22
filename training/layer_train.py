@@ -222,12 +222,40 @@ def train_one(weight, *, rank, steps=100, batch_size=32, lr=0.002,
     opt=torch.optim.AdamW(model.parameters(),lr=lr,weight_decay=0.)
     if resume:
         opt.load_state_dict(data['optimizer'])
+    # The selection probes and final audit probes are deliberately independent.
+    # Selecting the lowest error on the same holdout reported to users would
+    # give optimistically biased quality figures.
     gen=torch.Generator(device='cpu').manual_seed(seed+10001)
-    hold_gen=torch.Generator(device='cpu').manual_seed(seed+8891)
-    holdout=torch.randn(96,weight.shape[1],generator=hold_gen).to(device)
+    val_gen=torch.Generator(device='cpu').manual_seed(seed+8891)
+    audit_gen=torch.Generator(device='cpu').manual_seed(seed+8892)
+    validation=torch.randn(96,weight.shape[1],generator=val_gen).to(device)
+    audit=torch.randn(96,weight.shape[1],generator=audit_gen).to(device)
     with torch.no_grad():
-        expected=holdout@teacher.t()
-        initial_rmse=float(torch.sqrt(torch.mean((model(holdout)-expected).square())).item())
+        validation_target=validation@teacher.t()
+        audit_target=audit@teacher.t()
+        current_validation_rmse=float(torch.sqrt(
+            torch.mean((model(validation)-validation_target).square())).item())
+        current_audit_rmse=float(torch.sqrt(
+            torch.mean((model(audit)-audit_target).square())).item())
+    if resume:
+        # Old saved optimizers did not track the best weights or independent
+        # baseline; treat their current state as a conservative baseline.
+        original_audit_rmse=float(data.get('initial_holdout_rmse', current_audit_rmse))
+        initial_validation_rmse=float(data.get('initial_validation_rmse', current_validation_rmse))
+        best_step=int(data.get('best_step', resumed))
+        best_validation_rmse=float(data.get('best_validation_rmse', current_validation_rmse))
+        best_snapshot=data.get('best_model', None)
+        if best_snapshot is None:
+            best_snapshot={name:t.detach().cpu().clone() for name,t in model.state_dict().items()}
+        if not math.isfinite(best_validation_rmse):
+            raise TrainingError('Nonfinite best checkpoint validation score')
+    else:
+        original_audit_rmse=current_audit_rmse
+        initial_validation_rmse=current_validation_rmse
+        best_validation_rmse=current_validation_rmse
+        best_step=0
+        best_snapshot={name:t.detach().cpu().clone() for name,t in model.state_dict().items()}
+    last_validation_rmse=current_validation_rmse
     for step in range(resumed,steps):
         if step==resumed and resumed:
             for _ in range(resumed):
@@ -243,17 +271,41 @@ def train_one(weight, *, rank, steps=100, batch_size=32, lr=0.002,
         torch.nn.utils.clip_grad_norm_(model.parameters(), 10.)
         opt.step()
         at=step+1
-        if checkpoint is not None and (at%checkpoint_every==0 or at==steps):
-            _save_state(checkpoint, {'version':1,'step':at,'teacher_sha256':digest,
-                'rank':rank,'seed':seed,'residual':residual,
-                'itq_iterations':itq_iterations,'batch_size':batch_size,'lr':lr,
-                'model':model.state_dict(),'optimizer':opt.state_dict()})
+        if at % checkpoint_every == 0 or at == steps:
+            with torch.no_grad():
+                last_validation_rmse=float(torch.sqrt(torch.mean(
+                    (model(validation)-validation_target).square())).item())
+            if not math.isfinite(last_validation_rmse):
+                raise TrainingError('Nonfinite held-out validation score')
+            if last_validation_rmse < best_validation_rmse:
+                best_validation_rmse=last_validation_rmse
+                best_step=at
+                best_snapshot={name:t.detach().cpu().clone()
+                               for name,t in model.state_dict().items()}
+            if checkpoint is not None:
+                _save_state(checkpoint, {'version':2,'step':at,'teacher_sha256':digest,
+                    'rank':rank,'seed':seed,'residual':residual,
+                    'itq_iterations':itq_iterations,'batch_size':batch_size,'lr':lr,
+                    'model':model.state_dict(),'optimizer':opt.state_dict(),
+                    'best_model':best_snapshot,'best_step':best_step,
+                    'best_validation_rmse':best_validation_rmse,
+                    'initial_validation_rmse':initial_validation_rmse,
+                    'initial_holdout_rmse':original_audit_rmse})
+    # The optimizer is checkpointed at the LAST step for resume. Only the
+    # best held-out validation factors are selected for export.
+    model.load_state_dict(best_snapshot)
     with torch.no_grad():
-        rmse=float(torch.sqrt(torch.mean((model(holdout)-expected).square())).item())
-        denom=float(torch.sqrt(torch.mean(expected.square())).item())
+        rmse=float(torch.sqrt(torch.mean((model(audit)-audit_target).square())).item())
+        denom=float(torch.sqrt(torch.mean(audit_target.square())).item())
     return {'model':model,'step':steps,'resumed_from_step':resumed,
-            'initial_holdout_rmse':initial_rmse,'holdout_rmse':rmse,
-            'holdout_nrmse':rmse/max(denom,1e-12),'teacher_sha256':digest,
+            'best_step':best_step,'best_validation_rmse':best_validation_rmse,
+            'initial_validation_rmse':initial_validation_rmse,
+            'last_step_validation_rmse':last_validation_rmse,
+            'independent_audit_probes':True,
+            'initial_holdout_rmse':original_audit_rmse,'holdout_rmse':rmse,
+            'holdout_nrmse':rmse/max(denom,1e-12),
+            'holdout_error_regressed':rmse > original_audit_rmse,
+            'teacher_sha256':digest,
             'rank':rank,'actual_effective_bits':estimated_effective_bits(*teacher.shape,rank,residual),
             'checkpoint':str(checkpoint) if checkpoint else None,
             'method':'layerwise_random_probe_qat_not_full_model_training'}

@@ -50,6 +50,17 @@ def parser():
     a.add_argument("--max-shard-gib", type=float, default=8,
                    help="Maximum permitted shard size in GiB, default 8")
 
+    preview = commands.add_parser("rank-plan",
+        help="Preview physical BPW for different factor ranks without training or loading weights")
+    preview.add_argument("--checkpoint", type=Path, required=True)
+    preview.add_argument("--layer", type=int, default=0)
+    preview.add_argument("--projection", choices=PROJECTIONS, default="self_attn.q_proj")
+    preview.add_argument("--ranks", type=int, nargs="+", default=[32, 64, 128, 256])
+    preview.add_argument("--target-bpw", type=float, default=0.55)
+    preview.add_argument("--max-teacher-mib", type=int, default=512)
+    preview.add_argument("--allow-test-shapes", action="store_true")
+    preview.add_argument("--no-residual", action="store_true")
+
     # Multi-projection training is strictly an opt-in local teacher workflow.
     for mode in ("inventory", "batch"):
         q = commands.add_parser(mode, help=(
@@ -136,7 +147,16 @@ def run(args):
 def main(argv=None):
     args=parser().parse_args(argv)
     try:
-        if args.mode == "acquire":
+        if args.mode == "rank-plan":
+            from .rank_plan import build_rank_plan
+            report = build_rank_plan(
+                args.checkpoint, layer=args.layer, projection=args.projection,
+                ranks=args.ranks, target_bpw=args.target_bpw,
+                max_teacher_mib=args.max_teacher_mib,
+                allow_test_shapes=args.allow_test_shapes,
+                residual=not args.no_residual)
+            print(json.dumps(report, indent=2))
+        elif args.mode == "acquire":
             from .teacher_acquire import acquire_teacher_shard
             result = acquire_teacher_shard(
                 out=args.out, layer=args.layer, projection=args.projection,

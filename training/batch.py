@@ -221,6 +221,26 @@ def _resume_audit(record, entry, out, source, settings):
         raise BatchTrainingError("Resume teacher tensor has changed: " + stem)
 
 
+def random_probe_gate(record, threshold):
+    """Pass only a finite, nonregressing random-probe audit and packed parity.
+
+    This is NOT a language quality metric. The held-out audit probes are
+    independent of the validation probes used to select the QAT checkpoint.
+    """
+    if (type(threshold) not in (float, int) or not math.isfinite(threshold)
+            or not 0 < threshold <= 10):
+        raise BatchTrainingError("Invalid quality gate threshold")
+    try:
+        normalized = float(record["holdout_nrmse"])
+        current = float(record["holdout_rmse"])
+        initial = float(record["initial_holdout_rmse"])
+    except (KeyError, TypeError, ValueError, OverflowError):
+        return False
+    return (record.get("packed_inference_verified") is True
+            and all(math.isfinite(x) for x in (normalized, current, initial))
+            and normalized <= threshold and current <= initial + 1e-8)
+
+
 def run_batch(*, source, out, layer_start=0, layer_end=62,
               projections=PROJECTIONS, rank=None, steps=50, batch_size=16,
               lr=0.002, itq_iterations=20, seed=42, device="cpu", residual=True,
@@ -303,8 +323,10 @@ def run_batch(*, source, out, layer_start=0, layer_end=62,
         record = run_single(single_args)
         packed = Path(record["packed_file"])
         record["packed_sha256"] = _sha_file(packed)
-        record["passes_random_probe_gate"] = (
-            float(record["holdout_nrmse"]) <= max_holdout_nrmse)
+        record["passes_random_probe_gate"] = random_probe_gate(
+            record, max_holdout_nrmse)
+        record["holdout_error_regressed"] = (
+            float(record["holdout_rmse"]) > float(record["initial_holdout_rmse"]) + 1e-8)
         record["random_probe_gate_threshold"] = float(max_holdout_nrmse)
         record["language_quality_verified"] = False
         record["full_model_trained"] = False
