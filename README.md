@@ -1,6 +1,33 @@
 # LittleBitChat
 
 
+## Get the actual pretrained Gemma 3 teacher — one shard, not the whole model
+
+The previous example `D:\Models\gemma-3-27b-it` was a placeholder and is not automatically installed. To train our own compressed model, we need the **original pretrained dense Gemma** weights—not a preexisting LittleBit checkpoint.
+
+Gemma 3 27B is hosted by Google on Hugging Face, with license-gated access. First, sign in at https://huggingface.co/google/gemma-3-27b-it and personally **accept Google's license**, then run:
+
+~~~powershell
+cd "$HOME\Desktop\LittleBitChat"
+git pull --ff-only origin main
+
+$py = "$HOME\Desktop\LittleBit-CUDA-venv\Scripts\python.exe"
+& $py -m pip install -r requirements-teacher.txt
+& "$HOME\Desktop\LittleBit-CUDA-venv\Scripts\hf.exe" auth login
+
+# Preview the exact original shard and its size; downloads only the JSON index:
+& $py littlebitchat.py train acquire --layer 0 --projection self_attn.q_proj --out models\gemma-3-27b-it
+
+# Explicitly authorize a single-shard download (potentially several GB):
+& $py littlebitchat.py train acquire --layer 0 --projection self_attn.q_proj --out models\gemma-3-27b-it --download
+
+# Scan then train one real projection from the local original:
+& $py littlebitchat.py train inventory --checkpoint models\gemma-3-27b-it --layer-start 0 --layer-end 1 --projections self_attn.q_proj
+& $py littlebitchat.py train batch --checkpoint models\gemma-3-27b-it --layer-start 0 --layer-end 1 --projections self_attn.q_proj --rank 32 --steps 50 --device cpu --max-jobs 1 --out training_runs\gemma-first
+~~~
+
+The script pins the official model revision and refuses an unknown-size or over-budget weight shard. It **does not** download the other 11 shards automatically or bypass the model license. [Full original teacher setup and limitations](docs/ORIGINAL_GEMMA_TEACHER.md).
+
 ## Automatic, resumable multi-projection training (new)
 
 You can now scan **original pretrained Gemma 3 27B dense teacher** tensors and automatically train selected LittleBit-2 projections sequentially. Every successful export is checksummed, audited and recorded in an atomic progress manifest. Interrupted sweeps can resume without repeating successful jobs or SVD initialization. One new projection per invocation is the safe default; failed quality gates are retained and reported without falsely certifying model quality.
