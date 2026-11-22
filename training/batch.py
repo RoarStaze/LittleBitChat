@@ -178,7 +178,8 @@ def _write_atomic(path, payload):
 def _settings(source, layer_start, layer_end, projections, *, rank, steps,
               batch_size, lr, itq_iterations, seed, device, residual,
               max_teacher_mib, checkpoint_every, max_holdout_nrmse,
-              allow_test_shapes, refine_output_scales=False):
+              allow_test_shapes, refine_output_scales=False,
+              binary_refine_channels=0):
     result = {
         "source": str(Path(source).resolve()), "layer_start": layer_start,
         "layer_end": layer_end, "projections": list(projections),
@@ -192,6 +193,8 @@ def _settings(source, layer_start, layer_end, projections, *, rank, steps,
     # Keep old default-mode manifests resumable, including pre-feature jobs.
     if refine_output_scales:
         result["refine_output_scales"] = True
+    if binary_refine_channels:
+        result["binary_refine_channels"] = binary_refine_channels
     return result
 
 
@@ -216,6 +219,8 @@ def _resume_audit(record, entry, out, source, settings):
             or audit.get("packed_file") != str(expected)
             or audit.get("refine_output_scales", False) != settings.get("refine_output_scales", False)
             or record.get("refine_output_scales", False) != settings.get("refine_output_scales", False)
+            or audit.get("binary_refine_channels", 0) != settings.get("binary_refine_channels", 0)
+            or record.get("binary_refine_channels", 0) != settings.get("binary_refine_channels", 0)
             or not audit.get("packed_inference_verified")):
         raise BatchTrainingError("Resume audit does not match checkpoint manifest: " + stem)
     # Verify original dense teacher has not changed. This is intentionally
@@ -252,7 +257,7 @@ def run_batch(*, source, out, layer_start=0, layer_end=62,
               lr=0.002, itq_iterations=20, seed=42, device="cpu", residual=True,
               max_teacher_mib=512, checkpoint_every=10, max_jobs=1,
               max_holdout_nrmse=0.25, allow_test_shapes=False, resume=False,
-              refine_output_scales=False):
+              refine_output_scales=False, binary_refine_channels=0):
     """Sequential train/verify/export with a durable checksummed progress file.
 
     Safe by default: at most one job per invocation, one teacher projection
@@ -268,6 +273,9 @@ def run_batch(*, source, out, layer_start=0, layer_end=62,
     if (type(resume) is not bool or type(allow_test_shapes) is not bool
             or type(refine_output_scales) is not bool):
         raise BatchTrainingError("Invalid boolean batch setting")
+    if type(binary_refine_channels) is not int or not 0 <= binary_refine_channels <= 256:
+        raise BatchTrainingError("binary_refine_channels must be in 0..256")
+
     projections = _validate_selection(layer_start, layer_end, projections)
     selected = _read_inventory(source, layer_start, layer_end, projections,
                                 max_teacher_mib, allow_test_shapes)
@@ -278,7 +286,9 @@ def run_batch(*, source, out, layer_start=0, layer_end=62,
                        checkpoint_every=checkpoint_every,
                        max_holdout_nrmse=max_holdout_nrmse,
                        allow_test_shapes=allow_test_shapes,
-                       refine_output_scales=refine_output_scales)
+                       refine_output_scales=refine_output_scales,
+            binary_refine_channels=binary_refine_channels,
+                       binary_refine_channels=binary_refine_channels)
     raw_out = Path(out)
     if raw_out.is_symlink():
         raise BatchTrainingError("Refusing output directory symlink")
