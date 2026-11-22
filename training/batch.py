@@ -287,7 +287,6 @@ def run_batch(*, source, out, layer_start=0, layer_end=62,
                        max_holdout_nrmse=max_holdout_nrmse,
                        allow_test_shapes=allow_test_shapes,
                        refine_output_scales=refine_output_scales,
-            binary_refine_channels=binary_refine_channels,
                        binary_refine_channels=binary_refine_channels)
     raw_out = Path(out)
     if raw_out.is_symlink():
@@ -337,6 +336,7 @@ def run_batch(*, source, out, layer_start=0, layer_end=62,
             max_teacher_mib=max_teacher_mib, checkpoint_every=checkpoint_every,
             resume=(resume and state.is_file()),
             refine_output_scales=refine_output_scales,
+            binary_refine_channels=binary_refine_channels,
         )
         print("Training " + key + " (new " + str(new + 1) + "/" + str(min(max_jobs, len(selected))) + ")",
               file=sys.stderr, flush=True)
