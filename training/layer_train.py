@@ -172,7 +172,21 @@ class LittleBitQAT(nn.Module):
                 second = cls._initialize_path(delta, rank, itq_iterations, seed+1,
                                               svd_oversample, svd_power_iters)
                 components.update({name+'_R':data for name,data in second.items()})
-        return cls(components, bias=bias)
+        candidate = cls(components, bias=bias)
+        if svd_oversample or svd_power_iters != 3:
+            # A better real-valued SVD is not necessarily a better signed
+            # factorization. Compare both COMPLETE binary paths at the same
+            # rank and packed bit budget, falling back to original initialization.
+            legacy = cls.from_teacher(weight, rank=rank,
+                                      itq_iterations=itq_iterations,
+                                      residual=residual, seed=seed, bias=bias)
+            with torch.no_grad():
+                target = weight.float()
+                candidate_sse = float((candidate.dense_weight() - target).square().sum())
+                legacy_sse = float((legacy.dense_weight() - target).square().sum())
+            if not math.isfinite(candidate_sse) or candidate_sse >= legacy_sse:
+                return legacy
+        return candidate
 
     def _forward_path(self, x, suffix=''):
         U,V = getattr(self,'U'+suffix),getattr(self,'V'+suffix)
