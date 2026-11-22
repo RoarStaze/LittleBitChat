@@ -116,8 +116,10 @@ def load_activation_bundle(source, teacher, *, layer, projection, max_mib=256):
     hashes = {key: _sample_hashes(samples) for key, samples in arrays.items()}
     for left, right in (("calibration", "selection"),
                         ("calibration", "audit"), ("selection", "audit")):
-        if hashes[left] & hashes[right]:
-            raise ActivationDataError("Exact duplicate activation row overlap: "+left+"/"+right)
+        # Shared BOS/prefix token inputs can legitimately recur across
+        # disjoint prompts. Reject fully reused splits, not shared prefixes.
+        if hashes[left].issubset(hashes[right]) or hashes[right].issubset(hashes[left]):
+            raise ActivationDataError("Whole activation split overlap: "+left+"/"+right)
     with path.open("rb") as handle:
         digest = hashlib.file_digest(handle, "sha256").hexdigest()
     return ActivationBundle(arrays["calibration"], arrays["selection"], arrays["audit"],
