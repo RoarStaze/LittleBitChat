@@ -31,6 +31,12 @@ def parser():
         p.add_argument('--seed',type=int,default=42)
         p.add_argument('--device',choices=('cpu','cuda'),default='cpu')
         p.add_argument('--no-residual',action='store_true')
+        p.add_argument('--svd-oversample',type=int,default=0,
+                       help='Extra randomized-SVD sketch dimensions, guarded by legacy error')
+        p.add_argument('--svd-power-iters',type=int,default=3,
+                       help='Randomized SVD power iterations (legacy=3)')
+        p.add_argument('--binary-refine-passes',type=int,default=1,
+                       help='Guarded sign-optimization sweeps over the selected channels')
         p.add_argument('--binary-refine-channels',type=int,default=0,
                        help='Greedily optimize this many binary sign channels before QAT (0=off)')
         p.add_argument('--refine-output-scales',action='store_true',
@@ -66,6 +72,10 @@ def parser():
                            help="Independent Gaussian probes; 96 matches the trainer audit count")
     diagnosis.add_argument("--max-teacher-mib", type=int, default=512)
     diagnosis.add_argument("--no-residual", action="store_true")
+    diagnosis.add_argument("--svd-oversample",type=int,default=0,
+                           help="Compare oversampled randomized-SVD to legacy")
+    diagnosis.add_argument("--svd-power-iters",type=int,default=3)
+    diagnosis.add_argument("--binary-refine-passes",type=int,default=1)
     diagnosis.add_argument("--binary-refine-channels",type=int,default=0,
                            help="Compare 1-bit sign-coordinate refinement to original")
     diagnosis.add_argument("--refine-output-scales", action="store_true",
@@ -106,6 +116,10 @@ def parser():
             q.add_argument("--seed", type=int, default=42)
             q.add_argument("--device", choices=("cpu", "cuda"), default="cpu")
             q.add_argument("--no-residual", action="store_true")
+            q.add_argument("--svd-oversample",type=int,default=0,
+                           help="Additional randomized-SVD sketch dimensions")
+            q.add_argument("--svd-power-iters",type=int,default=3)
+            q.add_argument("--binary-refine-passes",type=int,default=1)
             q.add_argument("--binary-refine-channels",type=int,default=0,
                            help="Optimize this many binary channels before QAT")
             q.add_argument("--refine-output-scales", action="store_true",
@@ -147,7 +161,10 @@ def run(args):
                      residual=not args.no_residual,device=args.device,
                      save_state=state,resume=args.resume,checkpoint_every=args.checkpoint_every,
                      refine_output_scales=args.refine_output_scales,
-                     binary_refine_channels=args.binary_refine_channels)
+                     binary_refine_channels=args.binary_refine_channels,
+                     binary_refine_passes=args.binary_refine_passes,
+                     svd_oversample=args.svd_oversample,
+                     svd_power_iters=args.svd_power_iters)
     model=result.pop('model')
     prefix=f'{PREFIX}.{layer}.{projection}'
     save_export(model,output,prefix)
@@ -182,7 +199,10 @@ def main(argv=None):
                 residual=not args.no_residual, probe_count=args.samples,
                 max_teacher_mib=args.max_teacher_mib,
                 refine_output_scales=args.refine_output_scales,
-                binary_refine_channels=args.binary_refine_channels)
+                binary_refine_channels=args.binary_refine_channels,
+                binary_refine_passes=args.binary_refine_passes,
+                svd_oversample=args.svd_oversample,
+                svd_power_iters=args.svd_power_iters)
             print(json.dumps(report, indent=2))
         elif args.mode == "rank-plan":
             from .rank_plan import build_rank_plan
@@ -219,6 +239,9 @@ def main(argv=None):
                                    residual=not args.no_residual,
                                    refine_output_scales=args.refine_output_scales,
                                    binary_refine_channels=args.binary_refine_channels,
+                                   binary_refine_passes=args.binary_refine_passes,
+                                   svd_oversample=args.svd_oversample,
+                                   svd_power_iters=args.svd_power_iters,
                                    checkpoint_every=args.checkpoint_every,
                                    max_jobs=args.max_jobs,
                                    max_holdout_nrmse=args.max_holdout_nrmse,
