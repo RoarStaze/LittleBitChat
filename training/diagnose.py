@@ -28,7 +28,7 @@ def _relative_rmse(actual, reference):
 
 @torch.no_grad()
 def diagnose_matrix(weight, *, rank, seed=42, itq_iterations=20, residual=True,
-                    probe_count=32):
+                    probe_count=32, refine_output_scales=False):
     """Estimate errors for a single dense teacher matrix and binary factors.
 
     Both matrix-relative and random-probe metrics are disclosed. Independent
@@ -48,6 +48,8 @@ def diagnose_matrix(weight, *, rank, seed=42, itq_iterations=20, residual=True,
         raise DiagnosisError("Residual flag must be boolean")
     if type(probe_count) is not int or not 1 <= probe_count <= 512:
         raise DiagnosisError("Sample count must be 1..512")
+    if type(refine_output_scales) is not bool:
+        raise DiagnosisError("refine_output_scales must be boolean")
     weight = weight.detach().to(device="cpu", dtype=torch.float32)
     out_features, in_features = weight.shape
 
@@ -64,6 +66,12 @@ def diagnose_matrix(weight, *, rank, seed=42, itq_iterations=20, residual=True,
     )
     compressed.eval()
     signed_weight = compressed.dense_weight()
+    refined_weight = None
+    refinement_details = None
+    if refine_output_scales:
+        from .scale_refinement import refine_output_row_scales
+        refinement_details = refine_output_row_scales(compressed, weight)
+        refined_weight = compressed.dense_weight()
     binary_relative = _relative_rmse(signed_weight, weight)
 
     # Same fixed probe seed convention as trainer audit, which enables
@@ -75,9 +83,13 @@ def diagnose_matrix(weight, *, rank, seed=42, itq_iterations=20, residual=True,
     signed_target = probes @ signed_weight.t()
     lowrank_probe = _relative_rmse(svd_target, target)
     binary_probe = _relative_rmse(signed_target, target)
-    if not all(math.isfinite(v) for v in (
-        lowrank_relative, binary_relative, lowrank_probe, binary_probe
-    )):
+    refined_relative = (_relative_rmse(refined_weight, weight)
+                        if refined_weight is not None else None)
+    refined_probe = (_relative_rmse(probes @ refined_weight.t(), target)
+                     if refined_weight is not None else None)
+    values = [lowrank_relative, binary_relative, lowrank_probe, binary_probe]
+    values += [x for x in (refined_relative, refined_probe) if x is not None]
+    if not all(math.isfinite(v) for v in values):
         raise DiagnosisError("Nonfinite approximation error; diagnostic invalid")
     return {
         "status": "PROJECTION_APPROXIMATION_DIAGNOSIS",
@@ -92,6 +104,15 @@ def diagnose_matrix(weight, *, rank, seed=42, itq_iterations=20, residual=True,
         "binary_initial_relative_weight_rmse": binary_relative,
         "svd_random_probe_nrmse": lowrank_probe,
         "binary_initial_random_probe_nrmse": binary_probe,
+        "refine_output_scales": refine_output_scales,
+        "binary_refined_relative_weight_rmse": refined_relative,
+        "binary_refined_random_probe_nrmse": refined_probe,
+        "refinement_weight_sse_before": (
+            refinement_details["weight_sse_before"] if refinement_details else None),
+        "refinement_weight_sse_after": (
+            refinement_details["weight_sse_after"] if refinement_details else None),
+        "refinement_changed": (
+            refinement_details["changed"] if refinement_details else None),
         "extra_binary_error_not_additive": True,
         "quantization_bpw": estimated_effective_bits(
             out_features, in_features, rank, residual),
@@ -111,13 +132,15 @@ def diagnose_matrix(weight, *, rank, seed=42, itq_iterations=20, residual=True,
 
 def diagnose_projection(checkpoint, *, layer=0, projection="self_attn.q_proj",
                         rank=128, seed=42, itq_iterations=20,
-                        residual=True, probe_count=32, max_teacher_mib=512):
+                        residual=True, probe_count=32, max_teacher_mib=512,
+                        refine_output_scales=False):
     """Load only one real-format local teacher tensor and leave all files intact."""
     weight = load_projection(checkpoint, layer=layer, projection=projection,
                              max_teacher_mib=max_teacher_mib)
     result = diagnose_matrix(
         weight, rank=rank, seed=seed, itq_iterations=itq_iterations,
-        residual=residual, probe_count=probe_count)
+        residual=residual, probe_count=probe_count,
+        refine_output_scales=refine_output_scales)
     result.update({
         "source": str(checkpoint),
         "layer": layer,
