@@ -44,6 +44,27 @@ class ActivationCalibrationCLITests(unittest.TestCase):
             self.assertFalse(report["validated_language_quality"])
             self.assertTrue(report["audit_independent_of_selection"])
 
+    def test_strict_bpw_budget_rejects_without_export(self):
+        gen=torch.Generator().manual_seed(33)
+        weight=torch.randn(8,12,generator=gen).bfloat16()
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp)
+            teacher=root/"teacher.safetensors"
+            bundle=root/"activation.safetensors"
+            out=root/"should_not_exist"
+            save_file({KEY:weight},str(teacher))
+            samples=[torch.randn(32,12,generator=gen) for _ in range(3)]
+            fixture_bundle(bundle,weight.float(),*samples)
+            cmd=[sys.executable,str(ROOT/"littlebitchat.py"),"train",
+                 "activation-calibrate","--checkpoint",str(teacher),
+                 "--activation-data",str(bundle),"--layer","0",
+                 "--projection","self_attn.q_proj","--rank","3",
+                 "--no-residual","--max-bpw","0.55","--out",str(out)]
+            p=subprocess.run(cmd,cwd=ROOT,capture_output=True,text=True,timeout=90)
+            self.assertNotEqual(p.returncode,0)
+            self.assertIn("max-bpw",p.stderr)
+            self.assertFalse(out.exists())
+
     def test_missing_capture_fails_without_output(self):
         with tempfile.TemporaryDirectory() as tmp:
             root=Path(tmp)
