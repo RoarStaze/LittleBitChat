@@ -15,3 +15,8 @@ tokenizer.model
 models/
 checkpoints/
 output/
+
+# Real/synthetic compression output, potentially large learned factors
+training_runs/
+*.state.pt
+*.state.pt.tmp
