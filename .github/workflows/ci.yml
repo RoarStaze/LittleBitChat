@@ -34,7 +34,7 @@ jobs:
         run: python -m pip install -r requirements.txt
       - name: Install CPU-only PyTorch for training
         run: python -m pip install torch --index-url https://download.pytorch.org/whl/cpu
-      - name: Verify Joint-ITQ, QAT, resume, real BF16 reader and packed export
+      - name: Verify QAT and no-network official teacher acquisition contracts
         run: python -m unittest discover -s training/tests -v
       - name: Verify standalone training command
         run: |

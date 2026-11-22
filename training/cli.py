@@ -38,6 +38,18 @@ def parser():
             p.add_argument('--layer',type=int,required=True)
             p.add_argument('--projection',choices=PROJECTIONS,required=True)
             p.add_argument('--max-teacher-mib',type=int,default=512)
+    # Access to original Gemma model is gated by Google's license.
+    # No pretrained weight download happens without --download.
+    a = commands.add_parser("acquire",
+        help="Plan or explicitly download ONE licensed original Google Gemma 3 weight shard")
+    a.add_argument("--layer", type=int, default=0)
+    a.add_argument("--projection", choices=PROJECTIONS, default="self_attn.q_proj")
+    a.add_argument("--out", type=Path, default=Path("models/gemma-3-27b-it"))
+    a.add_argument("--download", action="store_true",
+                   help="Explicit permission to download ONE shard (several GiB)")
+    a.add_argument("--max-shard-gib", type=float, default=8,
+                   help="Maximum permitted shard size in GiB, default 8")
+
     # Multi-projection training is strictly an opt-in local teacher workflow.
     for mode in ("inventory", "batch"):
         q = commands.add_parser(mode, help=(
@@ -124,7 +136,13 @@ def run(args):
 def main(argv=None):
     args=parser().parse_args(argv)
     try:
-        if args.mode in ("inventory", "batch"):
+        if args.mode == "acquire":
+            from .teacher_acquire import acquire_teacher_shard
+            result = acquire_teacher_shard(
+                out=args.out, layer=args.layer, projection=args.projection,
+                download=args.download, max_shard_gib=args.max_shard_gib)
+            print(json.dumps(result, indent=2))
+        elif args.mode in ("inventory", "batch"):
             from .batch import scan_source, run_batch
             common = {
                 "source": args.checkpoint,
