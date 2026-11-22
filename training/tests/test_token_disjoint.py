@@ -67,10 +67,10 @@ class TokenPartitionTests(unittest.TestCase):
                 min_unique_tokens=15,vocab_size=256)
 
 
-class CaptureAndValidationTests(Layer0CaptureTests):
+class CaptureAndValidationTests(unittest.TestCase):
     """Inherits original capture checks and adds token-disjoint guarantees."""
     def setUp(self):
-        super().setUp()
+        Layer0CaptureTests.setUp(self)
         self.groups={
             "calibration":["cal zero","cal one","cal two"],
             "selection":["sel zero","sel one","sel two"],
