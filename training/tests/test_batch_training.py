@@ -124,6 +124,26 @@ class BatchTrainingTests(unittest.TestCase):
                                             binary_refine_channels=2))
         self.assertEqual(continued["skipped_jobs"], 1)
 
+    def test_stronger_foundation_policy_is_saved_and_resumed(self):
+        options = dict(max_jobs=1, binary_refine_channels=2,
+                       binary_refine_passes=2, svd_oversample=2,
+                       svd_power_iters=4)
+        a = run_batch(**self._kwargs(**options))
+        self.assertEqual(a["jobs"][0]["svd_oversample"], 2)
+        self.assertEqual(a["jobs"][0]["binary_refine_passes"], 2)
+        cfg = json.loads((self.out / "batch_manifest.json").read_text())["settings"]
+        self.assertEqual(cfg["svd_oversample"], 2)
+        self.assertEqual(cfg["svd_power_iters"], 4)
+        self.assertEqual(cfg["binary_refine_passes"], 2)
+        with self.assertRaisesRegex(BatchTrainingError, "configuration|mismatch"):
+            run_batch(**self._kwargs(resume=True, max_jobs=1,
+                                     binary_refine_channels=2,
+                                     binary_refine_passes=1,
+                                     svd_oversample=2, svd_power_iters=4))
+        b = run_batch(**self._kwargs(resume=True, **options))
+        self.assertEqual(b["skipped_jobs"], 1)
+        self.assertEqual(b["new_jobs"], 1)
+
     def test_one_new_job_per_resume_continues_to_next_projection(self):
         first = run_batch(**self._kwargs(max_jobs=1))
         self.assertEqual(first["new_jobs"], 1)
