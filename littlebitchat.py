@@ -36,6 +36,8 @@ def create_parser():
     preflight.add_argument("--gpu-gib", type=float, default=6.0)
     preflight.add_argument("--ram-gib", type=float, default=16.0)
 
+    commands.add_parser("train", help="Train YOUR LittleBit-2 layer factors (requires optional PyTorch)")
+
     chat = commands.add_parser("chat", help="Try real local chat using YOUR trained packed weights")
     chat.add_argument("--checkpoint", type=Path)
     chat.add_argument("--tokenizer", type=Path)
@@ -109,6 +111,16 @@ def _chat(args):
 
 
 def main(argv=None):
+    if argv is None:
+        argv = sys.argv[1:]
+    if argv and argv[0] == "train":
+        try:
+            from training.cli import main as training_main
+        except ImportError as exc:
+            print("LittleBit training requires PyTorch and Safetensors. Install requirements-training.txt: " + str(exc),
+                  file=sys.stderr)
+            return 2
+        return training_main(argv[1:])
     parser = create_parser()
     args = parser.parse_args(argv)
     try:
