@@ -78,6 +78,16 @@ class ActivationBundleTests(unittest.TestCase):
                 load_activation_bundle(path, self.teacher, layer=0,
                                        projection="self_attn.q_proj")
 
+    def test_allows_shared_prefix_rows_between_disjoint_prompts(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path=Path(tmp)/"shared_prefix.safetensors"
+            train,select,audit = [x.clone() for x in self.groups]
+            select[0]=train[0]  # identical BOS hidden input across different prompts
+            fixture_bundle(path,self.teacher,train,select,audit)
+            bundle=load_activation_bundle(path,self.teacher,layer=0,
+                                          projection="self_attn.q_proj")
+            self.assertEqual(bundle.selection.shape[0],20)
+
     def test_rejects_no_provenance_or_missing_file(self):
         with tempfile.TemporaryDirectory() as tmp:
             path=Path(tmp)/"capture.safetensors"
@@ -125,6 +135,23 @@ class ActivationOptimizerTests(unittest.TestCase):
         for n,p in model.named_parameters():
             torch.testing.assert_close(p,original[n],rtol=0,atol=0)
         self.assertEqual(result["selection_nrmse_after"],result["selection_nrmse_before"])
+
+    def test_audit_cannot_influence_selection_or_candidate_weights(self):
+        a=fixture(residual=True)
+        b=fixture(residual=True)
+        teacher=a.dense_weight()*1.3
+        gen=torch.Generator().manual_seed(31)
+        cal=torch.randn(48,12,generator=gen)
+        sel=torch.randn(48,12,generator=gen)
+        audit1=torch.randn(48,12,generator=gen)
+        audit2=torch.randn(48,12,generator=gen)*2.0
+        first=calibrate_activation_scales(a,teacher,cal,sel,audit1)
+        second=calibrate_activation_scales(b,teacher,cal,sel,audit2)
+        self.assertEqual(first["accepted"], second["accepted"])
+        self.assertAlmostEqual(first["selection_nrmse_after"],
+                               second["selection_nrmse_after"],places=7)
+        for key in ("u1","u1_R"):
+            torch.testing.assert_close(getattr(a,key),getattr(b,key),rtol=0,atol=0)
 
     def test_residual_paths_and_untouched_signs(self):
         model=fixture(residual=True)
