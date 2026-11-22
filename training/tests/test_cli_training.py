@@ -49,6 +49,23 @@ class TrainingCLITests(unittest.TestCase):
         self.assertIn('layer', result.stdout)
         self.assertIn('demo', result.stdout)
 
+    def test_real_checkpoint_projection_trains_and_exports(self):
+        with tempfile.TemporaryDirectory() as td:
+            root=Path(td)
+            teacher=root/'teacher.safetensors'
+            save_file({PREFIX+'.weight':torch.randn(16,24).bfloat16()},str(teacher))
+            export=root/'trained'
+            p=subprocess.run([sys.executable,'-m','training.cli','layer',
+                '--checkpoint',str(teacher),'--layer','0','--projection','self_attn.q_proj',
+                '--rank','8','--steps','5','--device','cpu','--out',str(export)],
+                cwd=ROOT,capture_output=True,text=True,timeout=90)
+            self.assertEqual(p.returncode,0,p.stderr)
+            report=json.loads(p.stdout)
+            self.assertTrue(report['teacher_weights_loaded_from_real_checkpoint'])
+            self.assertFalse(report['teacher_is_synthetic'])
+            self.assertTrue(report['packed_inference_verified'])
+            self.assertTrue(Path(report['packed_file']).exists())
+
     def test_without_teacher_checkpoint_fails_closed(self):
         p=subprocess.run([sys.executable,'-m','training.cli','layer','--checkpoint','nonexistent',
           '--layer','0','--projection','mlp.up_proj','--out','ignored'],cwd=ROOT,capture_output=True,text=True,timeout=30)
