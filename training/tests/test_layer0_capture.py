@@ -1,5 +1,7 @@
 """Small, exact layer-0 Gemma 3 activation capture without a full-model load."""
 import json
+import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -63,6 +65,19 @@ class Layer0CaptureTests(unittest.TestCase):
         self.assertEqual(info["embedding_shape"],[48,12])
         self.assertEqual(info["norm_shape"],[12])
         self.assertEqual(info["projection_shape"],[8,12])
+
+    def test_layer0_preflight_cli_is_lightweight_and_reports_missing_tokenizer(self):
+        root=Path(__file__).resolve().parents[2]
+        run=subprocess.run(
+            [sys.executable,str(root/"littlebitchat.py"),"train","layer0-preflight",
+             "--checkpoint",str(self.ckpt),"--projection","self_attn.q_proj"],
+            cwd=root,capture_output=True,text=True,timeout=30)
+        self.assertEqual(run.returncode,0,run.stderr)
+        report=json.loads(run.stdout)
+        self.assertTrue(report["needed_weight_shards_present"])
+        self.assertFalse(report["tokenizer_json_present"])
+        self.assertFalse(report["ready_for_capture"])
+        self.assertFalse(report["full_model_required"])
 
     def test_exact_bf16_forward_equivalence_to_embeddings_and_gemma_rmsnorm(self):
         ids=[2, 3, 12, 7]
