@@ -16,16 +16,21 @@ import torch
 
 
 @torch.no_grad()
-def refine_binary_signs(model, teacher, *, channels=8):
+def refine_binary_signs(model, teacher, *, channels=8, passes=1):
     """Greedily refine up to `channels` high-energy binary rank components.
 
     Sign choices for each selected U column and then V row are the exact
     row/column minimizers for that fixed counterpart, holding all other
-    channels fixed. A channel update is accepted only for lower teacher SSE;
-    the entire model is restored if the final FP32 reconstruction regresses.
+    channels fixed. Revisit the same selected primary and residual channels
+    for at most 'passes' sweeps, stopping early if there are no accepted
+    updates. The first accepted sign state is saved for full rollback.
+    A channel update is accepted only for lower teacher SSE; the entire model
+    is restored if the final FP32 reconstruction regresses.
     """
     if type(channels) is not int or not 0 <= channels <= 256:
         raise ValueError("binary refinement channels must be an integer in 0..256")
+    if type(passes) is not int or not 1 <= passes <= 8:
+        raise ValueError("binary refinement passes must be an integer in 1..8")
     if (not isinstance(teacher, torch.Tensor) or teacher.ndim != 2
             or not teacher.is_floating_point()
             or not bool(torch.isfinite(teacher).all())):
@@ -42,8 +47,10 @@ def refine_binary_signs(model, teacher, *, channels=8):
         raise ValueError("Nonfinite baseline reconstruction loss")
     if channels == 0:
         return dict(changed=False, examined_channels=0, accepted_channels=0,
+                    accepted_updates=0, passes_requested=passes, passes_completed=0,
                     weight_sse_before=before, weight_sse_after=before,
-                    algorithm="binary_coordinate_descent_v1")
+                    algorithm="binary_coordinate_descent_v2" if passes > 1
+                    else "binary_coordinate_descent_v1")
 
     ranked = []
     for suffix in ("", "_R") if model.residual else ("",):
@@ -64,47 +71,57 @@ def refine_binary_signs(model, teacher, *, channels=8):
     ranked.sort(key=lambda entry: entry[0], reverse=True)
     selection = ranked[:channels]
     originals = {}
-    accepted = 0
+    accepted_channels = set()
+    accepted_updates = 0
+    passes_completed = 0
+    for _ in range(passes):
+        pass_updates = 0
+        for _, suffix, k in selection:
+            U, V = getattr(model, "U"+suffix), getattr(model, "V"+suffix)
+            u1, u2, v1, v2 = [
+                getattr(model, name+suffix) for name in ("u1", "u2", "v1", "v2")
+            ]
+            # Signed outer-product contribution of this one component.
+            coeff = u1 * (u2[k] * v1[k])
+            old_u = U[:, k].clone()
+            old_v = V[k, :].clone()
+            a = torch.where(old_u >= 0, coeff, -coeff)
+            b = torch.where(old_v >= 0, v2, -v2)
+            other_residual = residual + torch.outer(a, b)
+            prior_sse = float(residual.square().sum())
 
-    for _, suffix, k in selection:
-        U, V = getattr(model, "U"+suffix), getattr(model, "V"+suffix)
-        u1, u2, v1, v2 = [
-            getattr(model, name+suffix) for name in ("u1", "u2", "v1", "v2")
-        ]
-        # Signed outer-product contribution of this one component.
-        coeff = u1 * (u2[k] * v1[k])
-        old_u = U[:, k].clone()
-        old_v = V[k, :].clone()
-        a = torch.where(old_u >= 0, coeff, -coeff)
-        b = torch.where(old_v >= 0, v2, -v2)
-        other_residual = residual + torch.outer(a, b)
-        prior_sse = float(residual.square().sum())
+            # For fixed V, every U sign minimizes its own target output row.
+            ugain = coeff * (other_residual @ b)
+            U[:, k].copy_(torch.where(ugain > 0, old_u.abs(),
+                             torch.where(ugain < 0, -old_u.abs(), old_u)))
+            new_u = U[:, k]
+            a = torch.where(new_u >= 0, coeff, -coeff)
 
-        # For fixed V, every U sign minimizes its own target output row.
-        ugain = coeff * (other_residual @ b)
-        U[:, k].copy_(torch.where(ugain > 0, old_u.abs(),
-                         torch.where(ugain < 0, -old_u.abs(), old_u)))
-        new_u = U[:, k]
-        a = torch.where(new_u >= 0, coeff, -coeff)
+            # For fixed U, every V sign minimizes its own input column.
+            vgain = v2 * (other_residual.T @ a)
+            V[k, :].copy_(torch.where(vgain > 0, old_v.abs(),
+                             torch.where(vgain < 0, -old_v.abs(), old_v)))
+            new_v = V[k, :]
+            b = torch.where(new_v >= 0, v2, -v2)
+            candidate_residual = other_residual - torch.outer(a, b)
+            candidate_sse = float(candidate_residual.square().sum())
 
-        # For fixed U, every V sign minimizes its own input column.
-        vgain = v2 * (other_residual.T @ a)
-        V[k, :].copy_(torch.where(vgain > 0, old_v.abs(),
-                         torch.where(vgain < 0, -old_v.abs(), old_v)))
-        new_v = V[k, :]
-        b = torch.where(new_v >= 0, v2, -v2)
-        candidate_residual = other_residual - torch.outer(a, b)
-        candidate_sse = float(candidate_residual.square().sum())
+            if math.isfinite(candidate_sse) and candidate_sse < prior_sse:
+                if suffix not in originals:
+                    originals[suffix] = {}
+                if k not in originals[suffix]:
+                    originals[suffix][k] = (old_u, old_v)
+                residual = candidate_residual
+                accepted_updates += 1
+                pass_updates += 1
+                accepted_channels.add((suffix, k))
+            else:
+                U[:, k].copy_(old_u)
+                V[k, :].copy_(old_v)
 
-        if math.isfinite(candidate_sse) and candidate_sse < prior_sse:
-            if suffix not in originals:
-                originals[suffix] = {}
-            originals[suffix][k] = (old_u, old_v)
-            residual = candidate_residual
-            accepted += 1
-        else:
-            U[:, k].copy_(old_u)
-            V[k, :].copy_(old_v)
+        passes_completed += 1
+        if pass_updates == 0:
+            break
 
     # Recompute through the actual packed-equivalent path, not a surrogate.
     after = float((target - model.dense_weight()).square().sum())
@@ -115,9 +132,13 @@ def refine_binary_signs(model, teacher, *, channels=8):
                 U[:, k].copy_(original_u)
                 V[k, :].copy_(original_v)
         after = before
-        accepted = 0
+        accepted_channels.clear()
+        accepted_updates = 0
 
     return dict(changed=after < before, examined_channels=len(selection),
-                accepted_channels=accepted, weight_sse_before=before,
-                weight_sse_after=after,
-                algorithm="binary_coordinate_descent_v1")
+                accepted_channels=len(accepted_channels),
+                accepted_updates=accepted_updates,
+                passes_requested=passes, passes_completed=passes_completed,
+                weight_sse_before=before, weight_sse_after=after,
+                algorithm="binary_coordinate_descent_v2" if passes > 1
+                else "binary_coordinate_descent_v1")
