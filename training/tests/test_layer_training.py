@@ -62,6 +62,19 @@ class TrainingTests(unittest.TestCase):
             self.assertEqual(two['step'], 20)
             self.assertEqual(two['resumed_from_step'], 15)
 
+    def test_resume_does_not_repeat_expensive_svd_itq(self):
+        from unittest.mock import patch
+        w = torch.randn(12, 20, generator=torch.Generator().manual_seed(72)) * .3
+        with tempfile.TemporaryDirectory() as d:
+            state = Path(d) / 'state.pt'
+            train_one(w, rank=8, steps=3, batch_size=8, lr=.003,
+                      itq_iterations=3, seed=11, save_state=state)
+            with patch('training.layer_train.initialize', side_effect=AssertionError('repeated SVD')):
+                result = train_one(w, rank=8, steps=5, batch_size=8, lr=.003,
+                                   itq_iterations=3, seed=11, save_state=state, resume=True)
+            self.assertEqual(result['resumed_from_step'], 3)
+            self.assertEqual(result['step'], 5)
+
     def test_missing_and_invalid_dense_checkpoint_fails_closed(self):
         with self.assertRaises((TrainingError, FileNotFoundError)):
             load_projection('/does/not/exist', layer=1, projection='mlp.up_proj')
