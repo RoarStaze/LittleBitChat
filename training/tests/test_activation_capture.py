@@ -1,6 +1,8 @@
 """Exercise a genuine PyTorch forward-pre-hook capture without loading 27B."""
 import tempfile
 import unittest
+import subprocess
+import sys
 from pathlib import Path
 
 import torch
@@ -55,6 +57,22 @@ class HookCaptureTests(unittest.TestCase):
                                           projection="self_attn.q_proj")
             torch.testing.assert_close(loaded.calibration,batches[0][0].reshape(-1,12))
             self.assertFalse(loaded.provenance_independently_verified)
+
+    def test_original_model_capture_cli_requires_memory_ack(self):
+        root=Path(__file__).resolve().parents[2]
+        with tempfile.TemporaryDirectory() as tmp:
+            target=Path(tmp)/"not_created.safetensors"
+            args=[sys.executable,str(root/"littlebitchat.py"),"train","capture-activations",
+                  "--checkpoint",tmp,
+                  "--layer","0","--projection","self_attn.q_proj",
+                  "--calibration-texts",str(Path(tmp)/"train.txt"),
+                  "--selection-texts",str(Path(tmp)/"select.txt"),
+                  "--audit-texts",str(Path(tmp)/"audit.txt"),
+                  "--out",str(target)]
+            result=subprocess.run(args,cwd=root,capture_output=True,text=True,timeout=25)
+            self.assertNotEqual(result.returncode,0)
+            self.assertIn("confirm",result.stderr.lower())
+            self.assertFalse(target.exists())
 
     def test_capture_refuses_mismatched_teacher_and_writes_nothing(self):
         model=TinyModel().eval()
