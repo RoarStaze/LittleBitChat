@@ -46,6 +46,28 @@ class QuantizationDiagnosisTests(unittest.TestCase):
         with self.assertRaises((ValueError,DiagnosisError)):
             diagnose_matrix(torch.full((12,16),float("nan")),rank=3)
 
+    def test_binary_refinement_reports_baseline_and_is_weight_nonregressing(self):
+        baseline = diagnose_matrix(self.matrix, rank=3, seed=42,
+                                   itq_iterations=2, probe_count=16)
+        refined = diagnose_matrix(self.matrix, rank=3, seed=42,
+                                  itq_iterations=2, probe_count=16,
+                                  refine_output_scales=True)
+        self.assertEqual(refined["teacher_sha256"], baseline["teacher_sha256"])
+        self.assertAlmostEqual(refined["binary_initial_relative_weight_rmse"],
+                               baseline["binary_initial_relative_weight_rmse"], places=6)
+        self.assertLessEqual(refined["binary_refined_relative_weight_rmse"],
+                             baseline["binary_initial_relative_weight_rmse"] + 1e-6)
+        self.assertLessEqual(refined["refinement_weight_sse_after"],
+                             refined["refinement_weight_sse_before"] + 1e-6)
+        self.assertTrue(refined["refine_output_scales"])
+        self.assertIsNotNone(refined["binary_refined_random_probe_nrmse"])
+        self.assertFalse(refined["training_was_run"])
+        self.assertEqual(refined["quantization_bpw"], baseline["quantization_bpw"])
+
+    def test_refinement_option_must_be_boolean(self):
+        with self.assertRaises(DiagnosisError):
+            diagnose_matrix(self.matrix, rank=3, refine_output_scales="yes")
+
     def test_missing_real_teacher_fails_without_writing_output(self):
         with tempfile.TemporaryDirectory() as tmp:
             p=Path(tmp)/"absent.safetensors"
@@ -74,12 +96,15 @@ class QuantizationDiagnosisTests(unittest.TestCase):
             args=[sys.executable,str(ROOT/"littlebitchat.py"),"train","diagnose",
                 "--checkpoint",str(source),"--layer","0",
                 "--projection","self_attn.q_proj","--rank","3",
-                "--itq-iterations","2","--samples","12","--no-residual"]
+                "--itq-iterations","2","--samples","12","--no-residual",
+                "--refine-output-scales"]
             p=subprocess.run(args,cwd=ROOT,capture_output=True,text=True,timeout=90)
             self.assertEqual(p.returncode,0,p.stderr)
             report=json.loads(p.stdout)
             self.assertEqual(report["status"],"PROJECTION_APPROXIMATION_DIAGNOSIS")
             self.assertFalse(report["training_was_run"])
+            self.assertTrue(report["refine_output_scales"])
+            self.assertIsNotNone(report["binary_refined_relative_weight_rmse"])
 
 
 if __name__=="__main__":
