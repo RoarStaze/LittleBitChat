@@ -99,6 +99,19 @@ class BatchTrainingTests(unittest.TestCase):
         self.assertEqual(second["skipped_jobs"], 1)
         self.assertEqual(second["new_jobs"], 1)
 
+    def test_refined_batch_policy_is_recorded_and_resume_checked(self):
+        a = run_batch(**self._kwargs(max_jobs=1, refine_output_scales=True))
+        self.assertTrue(a["jobs"][0]["refine_output_scales"])
+        manifest = json.loads((self.out / "batch_manifest.json").read_text())
+        self.assertTrue(manifest["settings"]["refine_output_scales"])
+        with self.assertRaisesRegex(BatchTrainingError, "configuration|mismatch"):
+            run_batch(**self._kwargs(max_jobs=1, resume=True,
+                                     refine_output_scales=False))
+        b = run_batch(**self._kwargs(max_jobs=1, resume=True,
+                                     refine_output_scales=True))
+        self.assertEqual(b["skipped_jobs"], 1)
+        self.assertEqual(b["new_jobs"], 1)
+
     def test_one_new_job_per_resume_continues_to_next_projection(self):
         first = run_batch(**self._kwargs(max_jobs=1))
         self.assertEqual(first["new_jobs"], 1)
