@@ -10,6 +10,7 @@ from safetensors.torch import save_file
 
 from training.layer_train import train_one, estimated_effective_bits
 from training.rank_plan import build_rank_plan
+from training.batch import random_probe_gate
 
 PREFIX = "language_model.model.layers.0.self_attn.q_proj"
 
@@ -67,6 +68,29 @@ class BestCheckpointTests(unittest.TestCase):
         self.assertIn("last_step_validation_rmse", result)
         self.assertIn("best_step", result)
         self.assertTrue(0 <= result["best_step"] <= result["step"])
+
+
+class BatchQualityGuardTests(unittest.TestCase):
+    def test_low_nrmse_but_worse_audit_error_is_not_accepted(self):
+        bad = {"holdout_nrmse": 0.12, "initial_holdout_rmse": 0.30,
+               "holdout_rmse": 0.34, "packed_inference_verified": True}
+        self.assertFalse(random_probe_gate(bad, threshold=0.25))
+
+    def test_low_error_and_nonregressing_audit_passes_numeric_gate(self):
+        good = {"holdout_nrmse": 0.18, "initial_holdout_rmse": 0.35,
+                "holdout_rmse": 0.25, "packed_inference_verified": True}
+        self.assertTrue(random_probe_gate(good, threshold=0.25))
+
+    def test_failed_packed_parity_or_nonfinite_error_fails_closed(self):
+        cases = [
+            {"holdout_nrmse": float("nan"), "initial_holdout_rmse": .3,
+             "holdout_rmse": .25, "packed_inference_verified": True},
+            {"holdout_nrmse": .01, "initial_holdout_rmse": .3,
+             "holdout_rmse": .25, "packed_inference_verified": False},
+        ]
+        for case in cases:
+            with self.subTest(case=case):
+                self.assertFalse(random_probe_gate(case, threshold=.25))
 
 
 class RankPlanTests(unittest.TestCase):
