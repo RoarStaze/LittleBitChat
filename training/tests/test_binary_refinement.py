@@ -15,7 +15,7 @@ def fixture(*, residual=False):
     factors = dict(U=torch.randn(rows, rank, generator=g),
                    V=torch.randn(rank, cols, generator=g),
                    u1=torch.linspace(.2, 1.8, rows), u2=torch.tensor([1.2, .8, .9]),
-                   v1=torch.tensor([.5, .6, .7]), v2=torch.linspace(.3, 1.5, cols))
+                   v1=torch.tensor([2.0, .6, .7]), v2=torch.linspace(.3, 1.5, cols))
     if residual:
         factors.update({key+"_R": (torch.randn(value.shape, generator=g)
                                    if key in ("U", "V") else value.clone())
