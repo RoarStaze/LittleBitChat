@@ -166,6 +166,29 @@ class CaptureAndValidationTests(unittest.TestCase):
                 min_unique_tokens=64,token_disjoint=True,allow_test_shapes=True)
         self.assertFalse((self.root/"denied.safetensors").exists())
 
+    def test_attestation_rejects_relabelled_ids_with_unchanged_rows(self):
+        path,_=self._capture()
+        data=load_file(str(path))
+        with safe_open(str(path),framework="pt",device="cpu") as opened:
+            meta=dict(opened.metadata())
+        old=data["token_ids_audit"].clone()
+        data["token_ids_audit"][0],data["token_ids_audit"][1]=old[1],old[0]
+        changed=self.root/"relabelled.safetensors"
+        save_file(data,str(changed),metadata=meta)
+        # All three ID sets are still disjoint. A label-only validation
+        # would incorrectly accept this altered activation bundle.
+        bundle=load_activation_bundle(
+            changed,self.teacher.float(),layer=0,projection="self_attn.q_proj",
+            require_token_disjoint=True)
+        self.assertTrue(bundle.token_disjoint_verified)
+        cmd=[sys.executable,str(ROOT/"littlebitchat.py"),"train","activation-audit",
+             "--checkpoint",str(self.ckpt),"--activation-data",str(changed),
+             "--layer","0","--projection","self_attn.q_proj",
+             "--require-token-disjoint"]
+        result=subprocess.run(cmd,cwd=ROOT,capture_output=True,text=True,timeout=35)
+        self.assertNotEqual(result.returncode,0)
+        self.assertRegex(result.stderr,"reconstruction|match|mismatch|source")
+
     def test_strict_calibration_and_read_only_audit_cli(self):
         path,report=self._capture()
         audit=subprocess.run([
