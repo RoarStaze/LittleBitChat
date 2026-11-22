@@ -50,6 +50,19 @@ def parser():
     a.add_argument("--max-shard-gib", type=float, default=8,
                    help="Maximum permitted shard size in GiB, default 8")
 
+    diagnosis = commands.add_parser("diagnose",
+        help="Read one real dense projection; compare randomized SVD and binary-init errors")
+    diagnosis.add_argument("--checkpoint", type=Path, required=True)
+    diagnosis.add_argument("--layer", type=int, default=0)
+    diagnosis.add_argument("--projection", choices=PROJECTIONS, default="self_attn.q_proj")
+    diagnosis.add_argument("--rank", type=int, default=128)
+    diagnosis.add_argument("--seed", type=int, default=42)
+    diagnosis.add_argument("--itq-iterations", type=int, default=20)
+    diagnosis.add_argument("--samples", type=int, default=96,
+                           help="Independent Gaussian probes; 96 matches the trainer audit count")
+    diagnosis.add_argument("--max-teacher-mib", type=int, default=512)
+    diagnosis.add_argument("--no-residual", action="store_true")
+
     preview = commands.add_parser("rank-plan",
         help="Preview physical BPW for different factor ranks without training or loading weights")
     preview.add_argument("--checkpoint", type=Path, required=True)
@@ -147,7 +160,15 @@ def run(args):
 def main(argv=None):
     args=parser().parse_args(argv)
     try:
-        if args.mode == "rank-plan":
+        if args.mode == "diagnose":
+            from .diagnose import diagnose_projection
+            report = diagnose_projection(
+                args.checkpoint, layer=args.layer, projection=args.projection,
+                rank=args.rank, seed=args.seed, itq_iterations=args.itq_iterations,
+                residual=not args.no_residual, probe_count=args.samples,
+                max_teacher_mib=args.max_teacher_mib)
+            print(json.dumps(report, indent=2))
+        elif args.mode == "rank-plan":
             from .rank_plan import build_rank_plan
             report = build_rank_plan(
                 args.checkpoint, layer=args.layer, projection=args.projection,
