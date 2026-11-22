@@ -112,6 +112,18 @@ class BatchTrainingTests(unittest.TestCase):
         self.assertEqual(b["skipped_jobs"], 1)
         self.assertEqual(b["new_jobs"], 1)
 
+    def test_binary_channel_budget_persists_through_batch_resume(self):
+        first = run_batch(**self._kwargs(max_jobs=1, binary_refine_channels=2))
+        self.assertEqual(first["jobs"][0]["binary_refine_channels"], 2)
+        settings = json.loads((self.out / "batch_manifest.json").read_text())["settings"]
+        self.assertEqual(settings["binary_refine_channels"], 2)
+        with self.assertRaisesRegex(BatchTrainingError, "configuration|mismatch"):
+            run_batch(**self._kwargs(max_jobs=1, resume=True,
+                                     binary_refine_channels=0))
+        continued = run_batch(**self._kwargs(max_jobs=1, resume=True,
+                                            binary_refine_channels=2))
+        self.assertEqual(continued["skipped_jobs"], 1)
+
     def test_one_new_job_per_resume_continues_to_next_projection(self):
         first = run_batch(**self._kwargs(max_jobs=1))
         self.assertEqual(first["new_jobs"], 1)

@@ -85,3 +85,44 @@ refuses a resume if the flag changes; batch manifests also record it when
 enabled. Do not claim a trained full model or language improvement from
 single-layer reconstruction metrics. The official teacher's provenance must
 still be verified independently.
+
+
+## Greedy binary sign-coordinate refinement (opt-in)
+
+For a stronger representation search than row-scale-only fitting, use
+`--binary-refine-channels 8`. This directly optimizes selected *binary*
+signs in both U and V factor matrices. It chooses the highest-energy
+components across both paths and alternates exact row-wise and column-wise
+sign decisions for each selected channel, holding the others fixed.
+It accepts a channel only if dense teacher squared error decreases. A final
+reconstruction safeguard rolls back all sign updates on numerical regression.
+Factor magnitudes, tensor layout, rank, and estimated BPW remain unchanged.
+
+First evaluate (no training, no outputs written):
+
+```powershell
+cd "$HOME\Desktop\LittleBitChat"
+git pull --ff-only origin main
+$py = "$HOME\Desktop\LittleBit-CUDA-venv\Scripts\python.exe"
+& $py littlebitchat.py train diagnose `
+  --checkpoint models\gemma-3-27b-it `
+  --layer 0 --projection self_attn.q_proj `
+  --rank 622 --itq-iterations 20 --samples 96 `
+  --refine-output-scales --binary-refine-channels 8
+```
+
+Compare `binary_initial_*`, `binary_refined_*` (row scales),
+and `binary_sign_refined_*` (new signed-factor optimization). The
+`binary_refine_details` object reports accepted versus examined channels
+and dense reconstruction SSE. The unchanged independent Gaussian probes are
+**evaluation only**, not optimization input; an improvement in dense SSE
+does not guarantee improved probe NRMSE or language capabilities.
+Do not claim the method beats LittleBit-2 on language benchmarks without
+activation calibration, full-model training and an actual held-out evaluation.
+
+To opt in for a *new* QAT run, supply both flags to `train layer` or
+`train batch`, using a fresh `--out` path. Run `train diagnose` first:
+more channels cost more time and temporary dense teacher memory. The
+safety limit is 0..256 channels per projection. Both flags are recorded
+in training checkpoints and in batch manifests; any different resume
+policy is rejected. Legacy runs retain the default 0-channel behavior.
