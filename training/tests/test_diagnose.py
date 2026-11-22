@@ -64,6 +64,24 @@ class QuantizationDiagnosisTests(unittest.TestCase):
         self.assertFalse(refined["training_was_run"])
         self.assertEqual(refined["quantization_bpw"], baseline["quantization_bpw"])
 
+    def test_greedy_binary_sign_diagnostic_keeps_baseline_and_bpw(self):
+        baseline = diagnose_matrix(self.matrix, rank=3, seed=42,
+                                   itq_iterations=2, probe_count=16)
+        improved = diagnose_matrix(self.matrix, rank=3, seed=42,
+                                   itq_iterations=2, probe_count=16,
+                                   refine_output_scales=True,
+                                   binary_refine_channels=3)
+        self.assertEqual(improved["teacher_sha256"], baseline["teacher_sha256"])
+        self.assertAlmostEqual(improved["binary_initial_relative_weight_rmse"],
+                               baseline["binary_initial_relative_weight_rmse"], places=6)
+        self.assertLessEqual(improved["binary_binary_refined_relative_weight_rmse"],
+                             improved["binary_refined_relative_weight_rmse"] + 1e-6)
+        self.assertEqual(improved["quantization_bpw"], baseline["quantization_bpw"])
+        self.assertEqual(improved["binary_refine_channels"], 3)
+        self.assertEqual(improved["binary_refine_details"]["examined_channels"], 3)
+        self.assertIsNotNone(improved["binary_binary_refined_random_probe_nrmse"])
+        self.assertFalse(improved["training_was_run"])
+
     def test_refinement_option_must_be_boolean(self):
         with self.assertRaises(DiagnosisError):
             diagnose_matrix(self.matrix, rank=3, refine_output_scales="yes")
