@@ -1,0 +1,17 @@
+__pycache__/
+*.py[cod]
+.venv/
+.env
+*.safetensors
+*.safetensors.index.json
+*.gguf
+*.bin
+*.pt
+*.pth
+*.ckpt
+*.onnx
+tokenizer.json
+tokenizer.model
+models/
+checkpoints/
+output/
