@@ -38,6 +38,36 @@ def parser():
             p.add_argument('--layer',type=int,required=True)
             p.add_argument('--projection',choices=PROJECTIONS,required=True)
             p.add_argument('--max-teacher-mib',type=int,default=512)
+    # Multi-projection training is strictly an opt-in local teacher workflow.
+    for mode in ("inventory", "batch"):
+        q = commands.add_parser(mode, help=(
+            "Inspect original Gemma projection headers without reading weights"
+            if mode == "inventory" else
+            "Resume-safe sequential QAT of selected dense Gemma projections"
+        ))
+        q.add_argument("--checkpoint", type=Path, required=True)
+        q.add_argument("--layer-start", type=int, default=0)
+        q.add_argument("--layer-end", type=int, default=62)
+        q.add_argument("--projections", nargs="+", choices=PROJECTIONS, default=PROJECTIONS)
+        q.add_argument("--max-teacher-mib", type=int, default=512)
+        q.add_argument("--allow-test-shapes", action="store_true",
+                       help="TEST FIXTURE ONLY: permit non-Gemma3-27B shapes; never establishes real-model quality")
+        if mode == "batch":
+            q.add_argument("--out", type=Path, default=Path("training_runs/batch"))
+            q.add_argument("--rank", type=int, default=32)
+            q.add_argument("--steps", type=int, default=50)
+            q.add_argument("--batch-size", type=int, default=16)
+            q.add_argument("--lr", type=float, default=0.002)
+            q.add_argument("--itq-iterations", type=int, default=20)
+            q.add_argument("--seed", type=int, default=42)
+            q.add_argument("--device", choices=("cpu", "cuda"), default="cpu")
+            q.add_argument("--no-residual", action="store_true")
+            q.add_argument("--checkpoint-every", type=int, default=10)
+            q.add_argument("--max-jobs", type=int, default=1,
+                           help="Maximum selected projections processed this invocation (default 1)")
+            q.add_argument("--max-holdout-nrmse", type=float, default=0.25,
+                           help="Random-probe error threshold only; NOT language quality")
+            q.add_argument("--resume", action="store_true")
     return root
 
 
@@ -94,7 +124,31 @@ def run(args):
 def main(argv=None):
     args=parser().parse_args(argv)
     try:
-        print(json.dumps(run(args),indent=2))
+        if args.mode in ("inventory", "batch"):
+            from .batch import scan_source, run_batch
+            common = {
+                "source": args.checkpoint,
+                "layer_start": args.layer_start,
+                "layer_end": args.layer_end,
+                "projections": args.projections,
+                "max_teacher_mib": args.max_teacher_mib,
+                "allow_test_shapes": args.allow_test_shapes,
+            }
+            if args.mode == "inventory":
+                result = scan_source(**common)
+            else:
+                result = run_batch(**common, out=args.out, rank=args.rank,
+                                   steps=args.steps, batch_size=args.batch_size,
+                                   lr=args.lr, itq_iterations=args.itq_iterations,
+                                   seed=args.seed, device=args.device,
+                                   residual=not args.no_residual,
+                                   checkpoint_every=args.checkpoint_every,
+                                   max_jobs=args.max_jobs,
+                                   max_holdout_nrmse=args.max_holdout_nrmse,
+                                   resume=args.resume)
+            print(json.dumps(result, indent=2))
+        else:
+            print(json.dumps(run(args),indent=2))
         return 0
     except (TrainingError,ValueError,FileNotFoundError,ImportError,RuntimeError,OSError) as exc:
         print('LittleBit training error: '+str(exc),file=sys.stderr)
