@@ -69,18 +69,48 @@ def _rank_one_scales(magnitude, iterations=15):
 
 
 @torch.no_grad()
-def initialize(weight: torch.Tensor, *, rank, itq_iterations=20, seed=42):
-    """SVD factors, then joint orthogonal ITQ; U@V is rotation-invariant."""
+def initialize(weight: torch.Tensor, *, rank, itq_iterations=20, seed=42,
+               svd_oversample=0, svd_power_iters=3):
+    """Reproducible randomized SVD + Joint-ITQ, with optional guarded search.
+
+    The default uses the exact legacy sampling settings. Advanced settings
+    compare the rank-truncated approximation to legacy on teacher weight SSE,
+    selecting the candidate only when it improves reconstruction.
+    """
     if weight.ndim != 2 or not weight.is_floating_point() or not torch.isfinite(weight).all():
         raise TrainingError('Finite 2D floating-point teacher matrix required')
     if type(rank) is not int or not 1 <= rank <= min(weight.shape):
         raise TrainingError('Rank outside teacher dimensions')
     if type(itq_iterations) is not int or not 0 <= itq_iterations <= 100:
         raise TrainingError('ITQ iterations must be 0..100')
+    if type(svd_oversample) is not int or not 0 <= svd_oversample <= 256:
+        raise TrainingError('svd_oversample must be 0..256')
+    if type(svd_power_iters) is not int or not 0 <= svd_power_iters <= 10:
+        raise TrainingError('svd_power_iters must be 0..10')
     generator = torch.Generator(device='cpu').manual_seed(seed)
-    with torch.random.fork_rng(devices=[]):
-        torch.manual_seed(seed)
-        a, s, v = torch.svd_lowrank(weight.float(), q=rank, niter=3)
+    dense = weight.float()
+
+    def lowrank(q, iterations):
+        # Reset the same seed for a fair controlled randomized SVD comparison.
+        with torch.random.fork_rng(devices=[]):
+            torch.manual_seed(seed)
+            return torch.svd_lowrank(dense, q=q, niter=iterations)
+
+    a, s, v = lowrank(rank, 3)
+    if svd_oversample or svd_power_iters != 3:
+        q = min(min(dense.shape), rank + svd_oversample)
+        alternative = lowrank(q, svd_power_iters)
+
+        def reconstruction_sse(parts):
+            left, singular, right = parts
+            approx = ((left[:, :rank] * singular[:rank]) @
+                      right[:, :rank].t())
+            return float((dense - approx).square().sum())
+
+        original_sse = reconstruction_sse((a, s, v))
+        enhanced_sse = reconstruction_sse(alternative)
+        if math.isfinite(enhanced_sse) and enhanced_sse < original_sse:
+            a, s, v = alternative
     u = a[:, :rank] * torch.sqrt(s[:rank])[None, :]
     vt = torch.sqrt(s[:rank])[:, None] * v[:, :rank].t()
     if itq_iterations:
@@ -122,22 +152,41 @@ class LittleBitQAT(nn.Module):
         self.register_buffer('bias', None if bias is None else bias.detach().clone().float())
 
     @staticmethod
-    def _initialize_path(weight, rank, itq_iterations, seed):
-        u,v = initialize(weight, rank=rank, itq_iterations=itq_iterations, seed=seed)
+    def _initialize_path(weight, rank, itq_iterations, seed,
+                         svd_oversample=0, svd_power_iters=3):
+        u,v = initialize(weight, rank=rank, itq_iterations=itq_iterations, seed=seed,
+                         svd_oversample=svd_oversample, svd_power_iters=svd_power_iters)
         u1,u2 = _rank_one_scales(u.abs())
         v1,v2 = _rank_one_scales(v.abs())
         return {'U':u, 'V':v, 'u1':u1, 'u2':u2, 'v1':v1, 'v2':v2}
 
     @classmethod
-    def from_teacher(cls, weight, *, rank, itq_iterations=20, residual=True, seed=42, bias=None):
-        components = cls._initialize_path(weight.float(), rank, itq_iterations, seed)
+    def from_teacher(cls, weight, *, rank, itq_iterations=20, residual=True,
+                     seed=42, bias=None, svd_oversample=0, svd_power_iters=3):
+        components = cls._initialize_path(weight.float(), rank, itq_iterations, seed,
+                                          svd_oversample, svd_power_iters)
         if residual:
             with torch.no_grad():
                 approx = cls(components).dense_weight()
                 delta = weight.float() - approx
-                second = cls._initialize_path(delta, rank, itq_iterations, seed+1)
+                second = cls._initialize_path(delta, rank, itq_iterations, seed+1,
+                                              svd_oversample, svd_power_iters)
                 components.update({name+'_R':data for name,data in second.items()})
-        return cls(components, bias=bias)
+        candidate = cls(components, bias=bias)
+        if svd_oversample or svd_power_iters != 3:
+            # A better real-valued SVD is not necessarily a better signed
+            # factorization. Compare both COMPLETE binary paths at the same
+            # rank and packed bit budget, falling back to original initialization.
+            legacy = cls.from_teacher(weight, rank=rank,
+                                      itq_iterations=itq_iterations,
+                                      residual=residual, seed=seed, bias=bias)
+            with torch.no_grad():
+                target = weight.float()
+                candidate_sse = float((candidate.dense_weight() - target).square().sum())
+                legacy_sse = float((legacy.dense_weight() - target).square().sum())
+            if not math.isfinite(candidate_sse) or candidate_sse >= legacy_sse:
+                return legacy
+        return candidate
 
     def _forward_path(self, x, suffix=''):
         U,V = getattr(self,'U'+suffix),getattr(self,'V'+suffix)
@@ -190,7 +239,8 @@ def _save_state(path, payload):
 def train_one(weight, *, rank, steps=100, batch_size=32, lr=0.002,
               itq_iterations=20, residual=True, seed=42, device='cpu',
               save_state=None, resume=False, checkpoint_every=25,
-              refine_output_scales=False, binary_refine_channels=0):
+              refine_output_scales=False, binary_refine_channels=0,
+              binary_refine_passes=1, svd_oversample=0, svd_power_iters=3):
     """QAT ONE projection against a frozen dense teacher on random probes.
 
     NOT full-LLM QAT and cannot independently create a conversational model.
@@ -205,6 +255,12 @@ def train_one(weight, *, rank, steps=100, batch_size=32, lr=0.002,
         raise TrainingError('refine_output_scales must be boolean')
     if type(binary_refine_channels) is not int or not 0 <= binary_refine_channels <= 256:
         raise TrainingError('binary_refine_channels must be an integer in 0..256')
+    if type(binary_refine_passes) is not int or not 1 <= binary_refine_passes <= 8:
+        raise TrainingError('binary_refine_passes must be 1..8')
+    if type(svd_oversample) is not int or not 0 <= svd_oversample <= 256:
+        raise TrainingError('svd_oversample must be 0..256')
+    if type(svd_power_iters) is not int or not 0 <= svd_power_iters <= 10:
+        raise TrainingError('svd_power_iters must be 0..10')
     if type(lr) not in (int,float) or not math.isfinite(lr) or not 0<lr<=1:
         raise TrainingError('Invalid learning rate')
     if device not in ('cpu','cuda') or (device=='cuda' and not torch.cuda.is_available()):
@@ -222,7 +278,10 @@ def train_one(weight, *, rank, steps=100, batch_size=32, lr=0.002,
             data.get('itq_iterations')!=itq_iterations or data.get('batch_size')!=batch_size or
             data.get('lr')!=lr or
             data.get('refine_output_scales', False)!=refine_output_scales or
-            data.get('binary_refine_channels', 0)!=binary_refine_channels):
+            data.get('binary_refine_channels', 0)!=binary_refine_channels or
+            data.get('binary_refine_passes', 1)!=binary_refine_passes or
+            data.get('svd_oversample', 0)!=svd_oversample or
+            data.get('svd_power_iters', 3)!=svd_power_iters):
             raise TrainingError('Resume state training/teacher mismatch')
         resumed=data['step']
         if type(resumed) is not int or steps<=resumed:
@@ -233,13 +292,16 @@ def train_one(weight, *, rank, steps=100, batch_size=32, lr=0.002,
         model.load_state_dict(data['model'])
     else:
         model=LittleBitQAT.from_teacher(teacher,rank=rank,itq_iterations=itq_iterations,
-                                        residual=residual,seed=seed).to(device)
+                                        residual=residual,seed=seed,
+                                        svd_oversample=svd_oversample,
+                                        svd_power_iters=svd_power_iters).to(device)
         if refine_output_scales:
             from .scale_refinement import refine_output_row_scales
             refine_output_row_scales(model, teacher)
         if binary_refine_channels:
             from .binary_refinement import refine_binary_signs
-            refine_binary_signs(model, teacher, channels=binary_refine_channels)
+            refine_binary_signs(model, teacher, channels=binary_refine_channels,
+                                passes=binary_refine_passes)
     opt=torch.optim.AdamW(model.parameters(),lr=lr,weight_decay=0.)
     if resume:
         opt.load_state_dict(data['optimizer'])
@@ -309,6 +371,9 @@ def train_one(weight, *, rank, steps=100, batch_size=32, lr=0.002,
                     'itq_iterations':itq_iterations,'batch_size':batch_size,'lr':lr,
                     'refine_output_scales': refine_output_scales,
                     'binary_refine_channels': binary_refine_channels,
+                    'binary_refine_passes': binary_refine_passes,
+                    'svd_oversample': svd_oversample,
+                    'svd_power_iters': svd_power_iters,
                     'model':model.state_dict(),'optimizer':opt.state_dict(),
                     'best_model':best_snapshot,'best_step':best_step,
                     'best_validation_rmse':best_validation_rmse,
@@ -331,6 +396,9 @@ def train_one(weight, *, rank, steps=100, batch_size=32, lr=0.002,
             'teacher_sha256':digest,
             'refine_output_scales': refine_output_scales,
             'binary_refine_channels': binary_refine_channels,
+            'binary_refine_passes': binary_refine_passes,
+            'svd_oversample': svd_oversample,
+            'svd_power_iters': svd_power_iters,
             'rank':rank,'actual_effective_bits':estimated_effective_bits(*teacher.shape,rank,residual),
             'checkpoint':str(checkpoint) if checkpoint else None,
             'method':'layerwise_random_probe_qat_not_full_model_training'}

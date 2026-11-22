@@ -126,3 +126,73 @@ more channels cost more time and temporary dense teacher memory. The
 safety limit is 0..256 channels per projection. Both flags are recorded
 in training checkpoints and in batch manifests; any different resume
 policy is rejected. Legacy runs retain the default 0-channel behavior.
+
+
+## Stronger mathematical foundation: guarded SVD + multi-pass binary optimization
+
+This opt-in experimental candidate addresses two weaknesses that were visible
+in the single-projection rank-622 diagnosis: randomized SVD truncation error
+and a one-pass local minimum in binary-sign refinement.
+
+**Guarded randomized SVD.** The legacy initializer uses `q=rank` and
+`niter=3` in `torch.svd_lowrank`. The advanced initializer generates
+a second sketch with `q=min(rank+oversample, smaller_dimension)` and a
+configurable number of power iterations, then keeps the candidate only
+when its *rank-truncated dense teacher weight SSE* is lower. Because the
+best real-valued approximation can produce worse binary signs, the
+complete two-path binary initializer is also compared against the
+unchanged legacy binary initialization; the lower-SSE result is used.
+This compares teacher *weight* errors, not activation loss or language
+quality. The method is randomized, not an exact SVD lower bound.
+
+**Multi-pass binary coordinate descent.** With
+`--binary-refine-passes N`, the same selected U/V sign channels in the
+primary and residual paths are revisited up to N times, retaining only
+lower-SSE coordinate updates and stopping if no changes are accepted.
+The full initial sign state is preserved for rollback. Diagnostics expose
+`passes_requested`, `passes_completed`, `accepted_updates`, and
+`accepted_channels`. With the default `N=1`, earlier runs retain their
+previous initialization.
+
+For your real Gemma 3 27B layer-0 q_proj, compare the **unchanged legacy
+baseline** against the enhanced stages with one read-only command:
+
+```powershell
+cd "$HOME\Desktop\LittleBitChat"
+git pull --ff-only origin main
+$py = "$HOME\Desktop\LittleBit-CUDA-venv\Scripts\python.exe"
+& $py littlebitchat.py train diagnose `
+  --checkpoint models\gemma-3-27b-it `
+  --layer 0 --projection self_attn.q_proj `
+  --rank 622 --itq-iterations 20 --samples 96 `
+  --svd-oversample 32 --svd-power-iters 5 `
+  --refine-output-scales `
+  --binary-refine-channels 64 --binary-refine-passes 3
+```
+
+The `svd_relative_weight_rmse` and `binary_initial_relative_weight_rmse`
+remain the original rank-622 baseline. Enhanced SVD values appear under
+`svd_enhanced_*`, the guarded two-path binary starting point under
+`binary_svd_enhanced_*`, row-scale fitting under `binary_refined_*`,
+and multi-pass sign fitting under `binary_sign_refined_*`.
+
+Important: this command can be substantially slower and use more temporary
+CPU RAM than the earlier diagnostic. Enhanced initialization may compute
+both legacy and enhanced SVDs for the main and residual factors and select
+the lower-loss *whole* binary candidate; the diagnostic additionally
+computes the independent legacy baseline for comparison. No training,
+downloads, checkpoint changes, or model assembly are performed.
+
+If testing subsequent QAT, provide the same flags to a **new**
+`train layer` or `train batch` output directory, never reuse an older
+checkpoint with different policy. The implementation rejects incompatible
+resumes and preserves existing defaults and packed BPW. Do not conflate
+weight-RMSE improvements with coherent Gemma 3 chat capabilities: real
+hidden-state activation calibration and model-wide validation remain
+outstanding.
+
+References for randomized SVD (principles, not empirical claims about
+this checkpoint): PyTorch `torch.svd_lowrank` documentation,
+https://docs.pytorch.org/docs/stable/generated/torch.svd_lowrank.html ;
+Halko, Martinsson & Tropp, *Finding Structure with Randomness*, SIAM
+Review 53(2), 2011, doi:10.1137/090771806.

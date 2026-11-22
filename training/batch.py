@@ -179,7 +179,8 @@ def _settings(source, layer_start, layer_end, projections, *, rank, steps,
               batch_size, lr, itq_iterations, seed, device, residual,
               max_teacher_mib, checkpoint_every, max_holdout_nrmse,
               allow_test_shapes, refine_output_scales=False,
-              binary_refine_channels=0):
+              binary_refine_channels=0, binary_refine_passes=1,
+              svd_oversample=0, svd_power_iters=3):
     result = {
         "source": str(Path(source).resolve()), "layer_start": layer_start,
         "layer_end": layer_end, "projections": list(projections),
@@ -195,6 +196,13 @@ def _settings(source, layer_start, layer_end, projections, *, rank, steps,
         result["refine_output_scales"] = True
     if binary_refine_channels:
         result["binary_refine_channels"] = binary_refine_channels
+    # Omit legacy defaults so pre-upgrade batch manifests remain resumable.
+    if binary_refine_passes != 1:
+        result["binary_refine_passes"] = binary_refine_passes
+    if svd_oversample:
+        result["svd_oversample"] = svd_oversample
+    if svd_power_iters != 3:
+        result["svd_power_iters"] = svd_power_iters
     return result
 
 
@@ -221,6 +229,12 @@ def _resume_audit(record, entry, out, source, settings):
             or record.get("refine_output_scales", False) != settings.get("refine_output_scales", False)
             or audit.get("binary_refine_channels", 0) != settings.get("binary_refine_channels", 0)
             or record.get("binary_refine_channels", 0) != settings.get("binary_refine_channels", 0)
+            or audit.get("binary_refine_passes", 1) != settings.get("binary_refine_passes", 1)
+            or record.get("binary_refine_passes", 1) != settings.get("binary_refine_passes", 1)
+            or audit.get("svd_oversample", 0) != settings.get("svd_oversample", 0)
+            or record.get("svd_oversample", 0) != settings.get("svd_oversample", 0)
+            or audit.get("svd_power_iters", 3) != settings.get("svd_power_iters", 3)
+            or record.get("svd_power_iters", 3) != settings.get("svd_power_iters", 3)
             or not audit.get("packed_inference_verified")):
         raise BatchTrainingError("Resume audit does not match checkpoint manifest: " + stem)
     # Verify original dense teacher has not changed. This is intentionally
@@ -257,7 +271,8 @@ def run_batch(*, source, out, layer_start=0, layer_end=62,
               lr=0.002, itq_iterations=20, seed=42, device="cpu", residual=True,
               max_teacher_mib=512, checkpoint_every=10, max_jobs=1,
               max_holdout_nrmse=0.25, allow_test_shapes=False, resume=False,
-              refine_output_scales=False, binary_refine_channels=0):
+              refine_output_scales=False, binary_refine_channels=0,
+              binary_refine_passes=1, svd_oversample=0, svd_power_iters=3):
     """Sequential train/verify/export with a durable checksummed progress file.
 
     Safe by default: at most one job per invocation, one teacher projection
@@ -275,6 +290,12 @@ def run_batch(*, source, out, layer_start=0, layer_end=62,
         raise BatchTrainingError("Invalid boolean batch setting")
     if type(binary_refine_channels) is not int or not 0 <= binary_refine_channels <= 256:
         raise BatchTrainingError("binary_refine_channels must be in 0..256")
+    if type(binary_refine_passes) is not int or not 1 <= binary_refine_passes <= 8:
+        raise BatchTrainingError("binary_refine_passes must be in 1..8")
+    if type(svd_oversample) is not int or not 0 <= svd_oversample <= 256:
+        raise BatchTrainingError("svd_oversample must be in 0..256")
+    if type(svd_power_iters) is not int or not 0 <= svd_power_iters <= 10:
+        raise BatchTrainingError("svd_power_iters must be in 0..10")
 
     projections = _validate_selection(layer_start, layer_end, projections)
     selected = _read_inventory(source, layer_start, layer_end, projections,
@@ -287,7 +308,10 @@ def run_batch(*, source, out, layer_start=0, layer_end=62,
                        max_holdout_nrmse=max_holdout_nrmse,
                        allow_test_shapes=allow_test_shapes,
                        refine_output_scales=refine_output_scales,
-                       binary_refine_channels=binary_refine_channels)
+                       binary_refine_channels=binary_refine_channels,
+                       binary_refine_passes=binary_refine_passes,
+                       svd_oversample=svd_oversample,
+                       svd_power_iters=svd_power_iters)
     raw_out = Path(out)
     if raw_out.is_symlink():
         raise BatchTrainingError("Refusing output directory symlink")
@@ -337,6 +361,9 @@ def run_batch(*, source, out, layer_start=0, layer_end=62,
             resume=(resume and state.is_file()),
             refine_output_scales=refine_output_scales,
             binary_refine_channels=binary_refine_channels,
+            binary_refine_passes=binary_refine_passes,
+            svd_oversample=svd_oversample,
+            svd_power_iters=svd_power_iters,
         )
         print("Training " + key + " (new " + str(new + 1) + "/" + str(min(max_jobs, len(selected))) + ")",
               file=sys.stderr, flush=True)
