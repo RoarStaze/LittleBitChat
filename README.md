@@ -1,6 +1,27 @@
 # LittleBitChat
 
 
+## Automatic, resumable multi-projection training (new)
+
+You can now scan **original pretrained Gemma 3 27B dense teacher** tensors and automatically train selected LittleBit-2 projections sequentially. Every successful export is checksummed, audited and recorded in an atomic progress manifest. Interrupted sweeps can resume without repeating successful jobs or SVD initialization. One new projection per invocation is the safe default; failed quality gates are retained and reported without falsely certifying model quality.
+
+~~~powershell
+cd "$HOME\Desktop\LittleBitChat"
+git pull --ff-only origin main
+
+$py = "$HOME\Desktop\LittleBit-CUDA-venv\Scripts\python.exe"
+
+# Requires original local dense Gemma 3 27B Safetensors, not a LittleBit output:
+& $py littlebitchat.py train inventory --checkpoint "D:\Models\gemma-3-27b-it" --layer-start 0 --layer-end 1
+
+# Train first projection only, from the actual teacher:
+& $py littlebitchat.py train batch --checkpoint "D:\Models\gemma-3-27b-it" --layer-start 0 --layer-end 1 --projections self_attn.q_proj --rank 32 --steps 50 --device cpu --max-jobs 1 --out training_runs\gemma-first
+~~~
+
+To process all seven projections in a layer, use a different fresh output directory and omit --projections; use --resume on subsequent runs. Detailed workflow: [BATCH_TRAINING.md](docs/BATCH_TRAINING.md).
+
+**This does not create a complete language model**. It requires the *original pretrained dense teacher* to transfer knowledge, still uses random-input probes (not true Gemma activations), and has not performed model-wide distillation or assembled a runnable 27B checkpoint.
+
 ## Train your own LittleBit-2 factors
 
 **New:** LittleBitChat now contains a **real learnable LittleBit-2 training pipeline**. It can train a single binary low-rank projection, use SVD + Joint-ITQ initialization, run SmoothSign quantization-aware updates, resume from the local optimizer checkpoint, and export a signed packed Safetensors tensor that the inference math can reproduce. See [Training documentation](docs/LITTLEBIT2_TRAINING.md) for the full instructions and limitations.
