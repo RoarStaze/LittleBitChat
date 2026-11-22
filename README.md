@@ -153,6 +153,21 @@ The explicit allow-unverified-checkpoint flag acknowledges **tensor names and sh
 
 **Unverified limitations:** The full 27B path has not been executed with authentic trained weights. Performance, text quality, model-wide numerical parity and measured process peak RAM/VRAM are unknown. FP32 K/V, per-token reloading of every decoder block, repeated KV concatenation, and repeated streaming of tied embeddings may be extremely slow. CuPy private pool caps are not whole-process VRAM limits. Vision encoder and multimodal features are not supported. The default 4096-token budget allocates planned capacity of 5 GiB VRAM and ~8.13 GiB RAM, but **does not prove the model fits**.
 
+## Activation-aware projection calibration (experimental)
+
+LittleBitChat now supports optional **real original-model activation capture**
+(`train capture-activations`) and **same-BPW calibration with holdout
+fallback** (`train activation-calibrate`). Three disjoint capture splits
+are required: fit / selection / independent audit. Missing activations are a
+hard error, not substituted with Gaussian inputs. Only existing output-row
+magnitude scales are modified and the fixed packed tensor format is retained.
+
+Capturing genuine Gemma 3 27B activations requires loading the complete
+original model on adequate RAM, potentially on another workstation. This is
+**not** whole-model training and does not establish Gemma chat quality.
+
+See [Activation-aware calibration and capture instructions](docs/ACTIVATION_CALIBRATION.md).
+
 ## Update later
 
 ~~~powershell
