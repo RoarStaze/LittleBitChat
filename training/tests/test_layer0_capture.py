@@ -89,6 +89,49 @@ class Layer0CaptureTests(unittest.TestCase):
             ids, self.embedding, self.norm, eps=1e-6)
         torch.testing.assert_close(observed,exact,rtol=0,atol=0)
 
+    def test_sparse_official_style_config_uses_default_rmsnorm_epsilon(self):
+        # The official Gemma 3 27B config omits optional rms_norm_eps:
+        # Gemma3TextConfig supplies 1e-6 by default.
+        (self.ckpt/"config.json").write_text(json.dumps({
+            "model_type": "gemma3",
+            "text_config": {"model_type": "gemma3_text",
+                            "hidden_size": 12, "num_hidden_layers": 62}
+        }))
+        out=self.root/"sparse_config_capture.safetensors"
+        result=capture_layer0_from_original_weights(
+            self.ckpt,out=out,projection="self_attn.q_proj",
+            tokenizer=self.tokenizer,prompts=self.groups,
+            max_rows=64,max_tokens=64,allow_test_shapes=True)
+        self.assertTrue(result["config_present_and_checked"])
+        from safetensors import safe_open
+        with safe_open(str(out),framework="pt",device="cpu") as opened:
+            self.assertEqual(float(opened.metadata()["rms_norm_eps"]),1e-6)
+        loaded=load_activation_bundle(
+            out,self.teacher.float(),layer=0,projection="self_attn.q_proj")
+        self.assertTrue(torch.isfinite(loaded.selection).all())
+
+    def test_explicit_rmsnorm_eps_is_preserved_and_invalid_eps_fails_closed(self):
+        from training.layer0_capture import _read_config_eps
+        config=self.ckpt/"config.json"
+        body={"model_type":"gemma3",
+              "text_config":{"model_type":"gemma3_text",
+                             "hidden_size":12,"rms_norm_eps":0.00001}}
+        config.write_text(json.dumps(body))
+        eps,verified=_read_config_eps(self.ckpt,12)
+        self.assertTrue(verified)
+        self.assertEqual(eps,0.00001)
+        for invalid in (None, 0, -1e-6, 0.1, "1e-6", True):
+            with self.subTest(eps=invalid):
+                body["text_config"]["rms_norm_eps"]=invalid
+                config.write_text(json.dumps(body))
+                with self.assertRaisesRegex(Layer0CaptureError,"Invalid original RMSNorm epsilon"):
+                    _read_config_eps(self.ckpt,12)
+        body["text_config"].pop("rms_norm_eps")
+        body["text_config"]["hidden_size"]=9999
+        config.write_text(json.dumps(body))
+        with self.assertRaisesRegex(Layer0CaptureError,"hidden_size"):
+            _read_config_eps(self.ckpt,12)
+
     def test_capture_only_needed_embedding_rows_and_reuse_existing_calibration(self):
         out=self.root/"capture.safetensors"
         result=capture_layer0_from_original_weights(

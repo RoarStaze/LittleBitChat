@@ -46,7 +46,10 @@ The output lists missing shard names without fetching or scanning your
 disk. `config_json_present` can be false; the layer-0 lightweight
 capture uses the documented Gemma 3 default RMSNorm epsilon (1e-6)
 when absent, and indicates this choice in provenance. A local
-`config.json`, if present, is validated for hidden size and epsilon.
+`config.json`, if present, is validated for hidden size. The optional
+`text_config.rms_norm_eps` uses Gemma3TextConfig's documented 1e-6 default
+when omitted (as in the original sparse config); an explicitly present
+value must still be finite and valid.
 
 ## 2. Obtain the official matching tokenizer, if missing
 
