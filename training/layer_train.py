@@ -190,7 +190,7 @@ def _save_state(path, payload):
 def train_one(weight, *, rank, steps=100, batch_size=32, lr=0.002,
               itq_iterations=20, residual=True, seed=42, device='cpu',
               save_state=None, resume=False, checkpoint_every=25,
-              refine_output_scales=False):
+              refine_output_scales=False, binary_refine_channels=0):
     """QAT ONE projection against a frozen dense teacher on random probes.
 
     NOT full-LLM QAT and cannot independently create a conversational model.
@@ -203,6 +203,8 @@ def train_one(weight, *, rank, steps=100, batch_size=32, lr=0.002,
         raise TrainingError('checkpoint_every outside 1..10000')
     if type(refine_output_scales) is not bool:
         raise TrainingError('refine_output_scales must be boolean')
+    if type(binary_refine_channels) is not int or not 0 <= binary_refine_channels <= 256:
+        raise TrainingError('binary_refine_channels must be an integer in 0..256')
     if type(lr) not in (int,float) or not math.isfinite(lr) or not 0<lr<=1:
         raise TrainingError('Invalid learning rate')
     if device not in ('cpu','cuda') or (device=='cuda' and not torch.cuda.is_available()):
@@ -219,7 +221,8 @@ def train_one(weight, *, rank, steps=100, batch_size=32, lr=0.002,
             data.get('seed')!=seed or data.get('residual')!=residual or
             data.get('itq_iterations')!=itq_iterations or data.get('batch_size')!=batch_size or
             data.get('lr')!=lr or
-            data.get('refine_output_scales', False)!=refine_output_scales):
+            data.get('refine_output_scales', False)!=refine_output_scales or
+            data.get('binary_refine_channels', 0)!=binary_refine_channels):
             raise TrainingError('Resume state training/teacher mismatch')
         resumed=data['step']
         if type(resumed) is not int or steps<=resumed:
@@ -234,6 +237,9 @@ def train_one(weight, *, rank, steps=100, batch_size=32, lr=0.002,
         if refine_output_scales:
             from .scale_refinement import refine_output_row_scales
             refine_output_row_scales(model, teacher)
+        if binary_refine_channels:
+            from .binary_refinement import refine_binary_signs
+            refine_binary_signs(model, teacher, channels=binary_refine_channels)
     opt=torch.optim.AdamW(model.parameters(),lr=lr,weight_decay=0.)
     if resume:
         opt.load_state_dict(data['optimizer'])
@@ -302,6 +308,7 @@ def train_one(weight, *, rank, steps=100, batch_size=32, lr=0.002,
                     'rank':rank,'seed':seed,'residual':residual,
                     'itq_iterations':itq_iterations,'batch_size':batch_size,'lr':lr,
                     'refine_output_scales': refine_output_scales,
+                    'binary_refine_channels': binary_refine_channels,
                     'model':model.state_dict(),'optimizer':opt.state_dict(),
                     'best_model':best_snapshot,'best_step':best_step,
                     'best_validation_rmse':best_validation_rmse,
@@ -323,6 +330,7 @@ def train_one(weight, *, rank, steps=100, batch_size=32, lr=0.002,
             'holdout_error_regressed':rmse > original_audit_rmse,
             'teacher_sha256':digest,
             'refine_output_scales': refine_output_scales,
+            'binary_refine_channels': binary_refine_channels,
             'rank':rank,'actual_effective_bits':estimated_effective_bits(*teacher.shape,rank,residual),
             'checkpoint':str(checkpoint) if checkpoint else None,
             'method':'layerwise_random_probe_qat_not_full_model_training'}
