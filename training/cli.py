@@ -81,6 +81,30 @@ def parser():
     diagnosis.add_argument("--refine-output-scales", action="store_true",
                            help="Compare original and joint row-calibrated binary factors")
 
+
+    activation = commands.add_parser(
+        "activation-calibrate",
+        help="Calibrate existing LittleBit output-row scales with explicitly captured "
+             "model activations and independent selection/audit splits")
+    activation.add_argument("--checkpoint", type=Path, required=True)
+    activation.add_argument("--activation-data", type=Path, required=True)
+    activation.add_argument("--layer", type=int, required=True)
+    activation.add_argument("--projection", choices=PROJECTIONS, required=True)
+    activation.add_argument("--rank", type=int, required=True)
+    activation.add_argument("--out", type=Path, required=True)
+    activation.add_argument("--max-bpw", type=float, default=0.55)
+    activation.add_argument("--max-activation-mib", type=int, default=256)
+    activation.add_argument("--max-teacher-mib", type=int, default=512)
+    activation.add_argument("--min-relative-improvement", type=float, default=0.0)
+    activation.add_argument("--seed", type=int, default=42)
+    activation.add_argument("--itq-iterations", type=int, default=20)
+    activation.add_argument("--svd-oversample", type=int, default=0)
+    activation.add_argument("--svd-power-iters", type=int, default=3)
+    activation.add_argument("--binary-refine-channels", type=int, default=0)
+    activation.add_argument("--binary-refine-passes", type=int, default=1)
+    activation.add_argument("--refine-output-scales", action="store_true")
+    activation.add_argument("--no-residual", action="store_true")
+
     preview = commands.add_parser("rank-plan",
         help="Preview physical BPW for different factor ranks without training or loading weights")
     preview.add_argument("--checkpoint", type=Path, required=True)
@@ -188,6 +212,106 @@ def run(args):
     return report
 
 
+
+def run_activation_calibration(args):
+    """Offline teacher-bound activation calibration with strict selection fallback."""
+    import math
+
+    from .activation_calibration import (
+        load_activation_bundle, calibrate_activation_scales,
+    )
+    from .layer_train import LittleBitQAT, estimated_effective_bits, _teacher_sha
+
+    if (type(args.max_bpw) not in (int, float) or
+            not math.isfinite(args.max_bpw) or not 0 < args.max_bpw <= 16):
+        raise TrainingError("max-bpw must be in (0,16]")
+    # Validate all inputs and the physical budget BEFORE creating any output.
+    teacher = load_projection(args.checkpoint, layer=args.layer,
+                              projection=args.projection,
+                              max_teacher_mib=args.max_teacher_mib)
+    rank = determine_rank(teacher.shape[1], teacher.shape[0],
+                          rank=args.rank, residual=not args.no_residual)
+    target_bpw = estimated_effective_bits(*teacher.shape, rank,
+                                           not args.no_residual)
+    if target_bpw > args.max_bpw + 1e-10:
+        raise TrainingError("Rank/residual factors exceed strict max-bpw budget")
+    bundle = load_activation_bundle(
+        args.activation_data, teacher, layer=args.layer,
+        projection=args.projection, max_mib=args.max_activation_mib)
+    model = LittleBitQAT.from_teacher(
+        teacher, rank=rank, residual=not args.no_residual,
+        itq_iterations=args.itq_iterations, seed=args.seed,
+        svd_oversample=args.svd_oversample, svd_power_iters=args.svd_power_iters)
+    if args.refine_output_scales:
+        from .scale_refinement import refine_output_row_scales
+        refine_output_row_scales(model, teacher)
+    if args.binary_refine_channels:
+        from .binary_refinement import refine_binary_signs
+        refine_binary_signs(model, teacher, channels=args.binary_refine_channels,
+                            passes=args.binary_refine_passes)
+    result = calibrate_activation_scales(
+        model, teacher, bundle.calibration, bundle.selection, bundle.audit,
+        min_relative_improvement=args.min_relative_improvement)
+    if result["estimated_effective_bpw"] != target_bpw:
+        raise TrainingError("Activation candidate changed effective BPW")
+
+    destination = args.out
+    if destination.is_symlink():
+        raise TrainingError("Refusing output symlink")
+    destination = destination.resolve()
+    if destination.exists() and not destination.is_dir():
+        raise TrainingError("Output path is not a directory")
+    stem = f"layer_{args.layer:02d}_{args.projection.replace('.', '_')}"
+    packed = destination / (stem + "_activation_calibrated.safetensors")
+    audit_path = destination / (stem + "_activation_calibrated.json")
+    if packed.exists() or audit_path.exists():
+        raise TrainingError("Activation export already exists; select a fresh out directory")
+    destination.mkdir(parents=True, exist_ok=True)
+    prefix = f"{PREFIX}.{args.layer}.{args.projection}"
+    save_export(model, packed, prefix)
+    x = bundle.audit[0].contiguous().float().numpy()
+    with torch.no_grad():
+        expected = model.cpu()(torch.from_numpy(x)[None])[0].numpy()
+    observed = packed_cpu_matvec(packed, prefix, x)
+    parity = bool(np.allclose(expected, observed, atol=1e-4, rtol=1e-4))
+    max_abs = float(np.max(np.abs(expected-observed)))
+    if not parity:
+        packed.unlink(missing_ok=True)
+        raise TrainingError("Activation export packed-inference parity mismatch")
+    report = {
+        "status": "ACTIVATION_CALIBRATION_EXPORTED",
+        "teacher_sha256": _teacher_sha(teacher),
+        "activation_sha256": bundle.activation_sha256,
+        "activation_source": str(args.activation_data),
+        "activation_source_provenance_independently_verified": False,
+        "activation_capture_claimed_method": bundle.metadata["capture_method"],
+        "activation_capture_claimed_source_model": bundle.metadata["source_model"],
+        "calibration_samples": int(bundle.calibration.shape[0]),
+        "selection_samples": int(bundle.selection.shape[0]),
+        "audit_samples": int(bundle.audit.shape[0]),
+        "layer": args.layer,
+        "projection": args.projection,
+        "rank": rank,
+        "residual_factors": bool(model.residual),
+        "max_bpw": args.max_bpw,
+        "svd_oversample": args.svd_oversample,
+        "svd_power_iters": args.svd_power_iters,
+        "binary_refine_channels": args.binary_refine_channels,
+        "binary_refine_passes": args.binary_refine_passes,
+        "refine_output_scales": args.refine_output_scales,
+        "packed_file": str(packed),
+        "audit_json": str(audit_path),
+        "packed_inference_verified": parity,
+        "packed_inference_max_abs_error": max_abs,
+        "full_model_trained": False,
+        "training_was_run": False,
+        "validated_language_quality": False,
+        **result,
+    }
+    audit_path.write_text(json.dumps(report, indent=2)+"\n", encoding="utf8")
+    return report
+
+
 def main(argv=None):
     args=parser().parse_args(argv)
     try:
@@ -204,6 +328,8 @@ def main(argv=None):
                 svd_oversample=args.svd_oversample,
                 svd_power_iters=args.svd_power_iters)
             print(json.dumps(report, indent=2))
+        elif args.mode == "activation-calibrate":
+            print(json.dumps(run_activation_calibration(args), indent=2))
         elif args.mode == "rank-plan":
             from .rank_plan import build_rank_plan
             report = build_rank_plan(
