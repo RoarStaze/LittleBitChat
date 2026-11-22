@@ -28,6 +28,24 @@ $py = "$HOME\Desktop\LittleBit-CUDA-venv\Scripts\python.exe"
 
 The script pins the official model revision and refuses an unknown-size or over-budget weight shard. It **does not** download the other 11 shards automatically or bypass the model license. [Full original teacher setup and limitations](docs/ORIGINAL_GEMMA_TEACHER.md).
 
+## Training quality guard and rank preview
+
+Real Gemma 3 layer-0 q_proj at rank 32 produced **0.04134 bits/weight and normalized holdout RMSE 0.89285**, with holdout error increasing from 0.63038 to 0.66471. The packed representation was correct, but its teacher approximation was poor.
+
+LittleBitChat now selects the **best validation-scoring snapshot** rather than automatically exporting the last optimizer step. It keeps optimizer and best model states separately for resumable QAT, audits the selection on independent held-out random probes, and rejects numeric quality promotion when error regresses or packed inference parity fails. **This is still not a measurement of language-model quality.**
+
+Preview which ranks produce which *estimated physical compression cost* without reading giant weight tensors or doing training:
+
+~~~powershell
+cd "$HOME\Desktop\LittleBitChat"
+git pull --ff-only origin main
+$py = "$HOME\Desktop\LittleBit-CUDA-venv\Scripts\python.exe"
+
+& $py littlebitchat.py train rank-plan --checkpoint models\gemma-3-27b-it --layer 0 --projection self_attn.q_proj --ranks 32 64 128 256 512 640 --target-bpw 0.55
+~~~
+
+Read [docs/TRAINING_QUALITY.md](docs/TRAINING_QUALITY.md) before increasing rank or steps. A real trained compressed 27B chatbot has **not** been built by this improvement.
+
 ## Automatic, resumable multi-projection training (new)
 
 You can now scan **original pretrained Gemma 3 27B dense teacher** tensors and automatically train selected LittleBit-2 projections sequentially. Every successful export is checksummed, audited and recorded in an atomic progress manifest. Interrupted sweeps can resume without repeating successful jobs or SVD initialization. One new projection per invocation is the safe default; failed quality gates are retained and reported without falsely certifying model quality.
