@@ -130,7 +130,10 @@ class TeacherAcquisitionTests(unittest.TestCase):
     def test_download_path_symlink_rejected(self):
         outer = Path(self.temp.name) / "outer"
         outer.mkdir()
-        self.out.symlink_to(outer, target_is_directory=True)
+        try:
+            self.out.symlink_to(outer, target_is_directory=True)
+        except (OSError, NotImplementedError):
+            self.skipTest("Creating symlinks requires Windows Developer Mode or privileges")
         with self.assertRaises(TeacherAcquireError):
             acquire_teacher_shard(
                 out=self.out, layer=0, projection="self_attn.q_proj",
