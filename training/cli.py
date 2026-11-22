@@ -82,6 +82,31 @@ def parser():
                            help="Compare original and joint row-calibrated binary factors")
 
 
+    layer0_check = commands.add_parser(
+        "layer0-preflight",
+        help="Inspect original layer-0 embedding/norm/projection shards and tokenizer without loading full model")
+    layer0_check.add_argument("--checkpoint",type=Path,required=True)
+    layer0_check.add_argument("--layer",type=int,default=0)
+    layer0_check.add_argument("--projection",choices=(
+        "self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj"),default="self_attn.q_proj")
+
+    lightweight = commands.add_parser(
+        "capture-layer0",
+        help="Reconstruct genuine Gemma 3 layer-0 attention inputs from sparse embedding rows + RMSNorm")
+    lightweight.add_argument("--checkpoint",type=Path,required=True)
+    lightweight.add_argument("--layer",type=int,default=0)
+    lightweight.add_argument("--projection",choices=(
+        "self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj"),default="self_attn.q_proj")
+    lightweight.add_argument("--tokenizer",type=Path,default=None,
+                             help="Explicit local Gemma tokenizer.json (default: checkpoint/tokenizer.json)")
+    lightweight.add_argument("--calibration-texts",type=Path,required=True)
+    lightweight.add_argument("--selection-texts",type=Path,required=True)
+    lightweight.add_argument("--audit-texts",type=Path,required=True)
+    lightweight.add_argument("--max-rows",type=int,default=512)
+    lightweight.add_argument("--max-tokens",type=int,default=128)
+    lightweight.add_argument("--max-teacher-mib",type=int,default=512)
+    lightweight.add_argument("--out",type=Path,required=True)
+
     capture = commands.add_parser(
         "capture-activations",
         help="Explicitly load COMPLETE original Gemma 3 checkpoint and capture real "
@@ -333,7 +358,27 @@ def run_activation_calibration(args):
 def main(argv=None):
     args=parser().parse_args(argv)
     try:
-        if args.mode == "diagnose":
+        if args.mode == "layer0-preflight":
+            from .layer0_capture import inspect_layer0_source
+            print(json.dumps(inspect_layer0_source(
+                args.checkpoint,layer=args.layer,projection=args.projection),indent=2))
+        elif args.mode == "capture-layer0":
+            from .capture_cli import _read_prompts
+            from .layer0_capture import capture_layer0_from_original_weights
+            from chat_tokenizer import GemmaChatTokenizer
+            tokenizer_path=args.tokenizer or args.checkpoint/"tokenizer.json"
+            tokenizer=GemmaChatTokenizer(tokenizer_path=tokenizer_path)
+            groups={
+                "calibration":_read_prompts(args.calibration_texts),
+                "selection":_read_prompts(args.selection_texts),
+                "audit":_read_prompts(args.audit_texts),
+            }
+            print(json.dumps(capture_layer0_from_original_weights(
+                args.checkpoint,layer=args.layer,projection=args.projection,
+                out=args.out,tokenizer=tokenizer,prompts=groups,
+                max_rows=args.max_rows,max_tokens=args.max_tokens,
+                max_teacher_mib=args.max_teacher_mib),indent=2))
+        elif args.mode == "diagnose":
             from .diagnose import diagnose_projection
             report = diagnose_projection(
                 args.checkpoint, layer=args.layer, projection=args.projection,
