@@ -1,0 +1,3 @@
+# CPU validation requires NumPy; CuPy is already installed in the existing GPU venv.
+numpy>=1.26,<3
+safetensors>=0.5,<1

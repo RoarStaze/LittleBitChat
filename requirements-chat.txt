@@ -1,0 +1,2 @@
+# Only needed when using a genuine local Gemma 3 tokenizer.json.
+tokenizers>=0.20,<1
