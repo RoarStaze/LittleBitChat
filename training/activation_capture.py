@@ -15,15 +15,22 @@ from .activation_calibration import _valid_sha
 from .layer_train import _teacher_sha
 
 
+class _CaptureComplete(Exception):
+    """Private signal to stop computation after observing target projection."""
+
+
 @torch.no_grad()
 def capture_projection_inputs(
         model, teacher, *, calibration_batches, selection_batches, audit_batches,
         out, layer, projection, source_model, calibration_text_sha256,
-        selection_text_sha256, audit_text_sha256, max_rows=512):
+        selection_text_sha256, audit_text_sha256, max_rows=512,
+        stop_after_hook=True):
     """Capture exact inputs entering a selected linear projection via a pre-hook.
 
     Batches can be argument tensors (model(batch)) or mappings of keyword
-    tensors (model(**batch)). The module must be active during each forward;
+    tensors (model(**batch)). Stop the remaining forward immediately after
+    reaching the pre-hook by default to avoid expensive decoder logits.
+    The module must be active during each forward;
     the capture fails rather than emitting fabricated data if the hook
     never fires. Runtime/VRAM requirements are dictated by caller's model.
     """
@@ -70,15 +77,20 @@ def capture_projection_inputs(
                 take=min(max_rows-count,x.shape[0])
                 rows.append(x[:take].clone())
                 count+=take
+            if stop_after_hook:
+                raise _CaptureComplete()
         handle=module.register_forward_pre_hook(hook)
         try:
             for batch in batches:
                 if count >= max_rows:
                     break
-                if isinstance(batch,dict):
-                    model(**batch)
-                else:
-                    model(batch)
+                try:
+                    if isinstance(batch,dict):
+                        model(**batch)
+                    else:
+                        model(batch)
+                except _CaptureComplete:
+                    pass
         finally:
             handle.remove()
         if count < 16:
