@@ -250,9 +250,10 @@ def run_batch(*, source, out, layer_start=0, layer_end=62,
                        checkpoint_every=checkpoint_every,
                        max_holdout_nrmse=max_holdout_nrmse,
                        allow_test_shapes=allow_test_shapes)
-    out = Path(out).resolve()
-    if out.is_symlink():
+    raw_out = Path(out)
+    if raw_out.is_symlink():
         raise BatchTrainingError("Refusing output directory symlink")
+    out = raw_out.resolve()
     manifest_path = out / "batch_manifest.json"
     if manifest_path.exists():
         if not resume:
@@ -276,18 +277,16 @@ def run_batch(*, source, out, layer_start=0, layer_end=62,
     # Import after up-front checkpoint/settings validation to avoid accidental
     # training or side effects when source shape, rank or manifest is invalid.
     from .cli import run as run_single
-    done = 0
     skipped = 0
     new = 0
     for entry in selected:
-        if done >= max_jobs:
-            break
         key = f"{entry['layer']:02d}:{entry['projection']}"
         if key in jobs:
             _resume_audit(jobs[key], entry, out, source, params)
             skipped += 1
-            done += 1
             continue
+        if new >= max_jobs:
+            break
         stem = f"layer_{entry['layer']:02d}_{entry['projection'].replace('.', '_')}"
         state = out / (stem + ".state.pt")
         single_args = SimpleNamespace(
@@ -299,7 +298,7 @@ def run_batch(*, source, out, layer_start=0, layer_end=62,
             max_teacher_mib=max_teacher_mib, checkpoint_every=checkpoint_every,
             resume=(resume and state.is_file()),
         )
-        print("Training " + key + " (" + str(done + 1) + "/" + str(min(max_jobs, len(selected))) + ")",
+        print("Training " + key + " (new " + str(new + 1) + "/" + str(min(max_jobs, len(selected))) + ")",
               file=sys.stderr, flush=True)
         record = run_single(single_args)
         packed = Path(record["packed_file"])
@@ -312,7 +311,6 @@ def run_batch(*, source, out, layer_start=0, layer_end=62,
         jobs[key] = record
         _write_atomic(manifest_path, manifest)
         new += 1
-        done += 1
     ordered = [jobs[f"{e['layer']:02d}:{e['projection']}"]
                for e in selected if f"{e['layer']:02d}:{e['projection']}" in jobs]
     return {
