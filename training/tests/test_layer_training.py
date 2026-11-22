@@ -75,6 +75,23 @@ class TrainingTests(unittest.TestCase):
             self.assertEqual(result['resumed_from_step'], 3)
             self.assertEqual(result['step'], 5)
 
+    def test_export_is_consumed_by_existing_littlebit_inference_reader(self):
+        import sys
+        engine = Path(__file__).resolve().parents[2] / 'engine'
+        sys.path.insert(0, str(engine))
+        from safetensors_layer import SafetensorsLittleBitLayer
+        w = torch.randn(16, 24, generator=torch.Generator().manual_seed(91)) * .11
+        model = LittleBitQAT.from_teacher(w, rank=8, itq_iterations=4, residual=True, seed=19)
+        x = torch.linspace(-1, 1, 24)
+        with tempfile.TemporaryDirectory() as d:
+            file = Path(d) / 'trained.safetensors'
+            name = 'language_model.model.layers.0.mlp.up_proj'
+            save_export(model, file, name)
+            layer = SafetensorsLittleBitLayer.from_file(file, name)
+            actual = np.asarray(layer.forward_cpu(x.tolist()), dtype=np.float32)
+            expected = model(x[None]).detach().numpy()[0]
+            np.testing.assert_allclose(actual, expected, rtol=1e-4, atol=1e-4)
+
     def test_missing_and_invalid_dense_checkpoint_fails_closed(self):
         with self.assertRaises((TrainingError, FileNotFoundError)):
             load_projection('/does/not/exist', layer=1, projection='mlp.up_proj')
