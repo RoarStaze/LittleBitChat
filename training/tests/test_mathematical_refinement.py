@@ -33,6 +33,19 @@ class StrongerSVDBaselineTests(unittest.TestCase):
         torch.testing.assert_close(old[0], explicit[0], rtol=0, atol=0)
         torch.testing.assert_close(old[1], explicit[1], rtol=0, atol=0)
 
+    def test_enhanced_svd_does_not_worsen_complete_binary_reconstruction(self):
+        baseline = LittleBitQAT.from_teacher(self.teacher, rank=6, seed=33,
+                                               itq_iterations=2, residual=True)
+        enhanced = LittleBitQAT.from_teacher(self.teacher, rank=6, seed=33,
+                                               itq_iterations=2, residual=True,
+                                               svd_oversample=8, svd_power_iters=5)
+        before = float((self.teacher-baseline.dense_weight()).square().sum())
+        after = float((self.teacher-enhanced.dense_weight()).square().sum())
+        self.assertLessEqual(after, before + 1e-5)
+        self.assertEqual(baseline.residual, enhanced.residual)
+        self.assertEqual(tuple(baseline.U.shape), tuple(enhanced.U.shape))
+        self.assertEqual(tuple(baseline.U_R.shape), tuple(enhanced.U_R.shape))
+
     def test_full_rank_clamps_oversampling_without_dimension_errors(self):
         u, v = initialize(self.teacher, rank=24, seed=4, itq_iterations=0,
                           svd_oversample=16, svd_power_iters=4)
