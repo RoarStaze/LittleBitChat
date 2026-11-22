@@ -153,6 +153,19 @@ The explicit allow-unverified-checkpoint flag acknowledges **tensor names and sh
 
 **Unverified limitations:** The full 27B path has not been executed with authentic trained weights. Performance, text quality, model-wide numerical parity and measured process peak RAM/VRAM are unknown. FP32 K/V, per-token reloading of every decoder block, repeated KV concatenation, and repeated streaming of tied embeddings may be extremely slow. CuPy private pool caps are not whole-process VRAM limits. Vision encoder and multimodal features are not supported. The default 4096-token budget allocates planned capacity of 5 GiB VRAM and ~8.13 GiB RAM, but **does not prove the model fits**.
 
+## Low-RAM capture for Gemma 3 layer 0
+
+For a 15.7 GB RAM laptop, use `train layer0-preflight` to check original
+embedding, first RMSNorm and q/k/v projection shard availability without
+loading the 27B model. After obtaining the matching original
+`tokenizer.json`, `train capture-layer0` reconstructs actual
+layer-0 attention input activations using only selected embedding rows.
+It does not need the full model or `config.json` when the original
+Gemma 3 default RMSNorm parameters apply. Layer 1+ and MLP captures
+remain unsupported by this lightweight method.
+
+[Step-by-step low-RAM capture instructions](docs/LAYER0_LIGHTWEIGHT_CAPTURE.md).
+
 ## Activation-aware projection calibration (experimental)
 
 LittleBitChat now supports optional **real original-model activation capture**
