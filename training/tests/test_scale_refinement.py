@@ -1,9 +1,12 @@
 """Output-row calibration must improve a fixed binary factorization without extra bits."""
 import unittest
+import tempfile
+from pathlib import Path
 
 import torch
 
-from training.layer_train import LittleBitQAT, estimated_effective_bits
+from training.layer_train import (LittleBitQAT, TrainingError, estimated_effective_bits,
+                                  train_one)
 from training.scale_refinement import refine_output_row_scales
 
 
@@ -62,6 +65,26 @@ class ScaleRefinementTests(unittest.TestCase):
         result = refine_output_row_scales(model, teacher)
         self.assertLessEqual(result["weight_sse_after"], result["weight_sse_before"] + 1e-8)
         self.assertTrue(torch.isfinite(model.dense_weight()).all())
+
+    def test_training_resume_rejects_changed_refinement_policy(self):
+        gen = torch.Generator().manual_seed(22)
+        teacher = torch.randn(5, 7, generator=gen)
+        with tempfile.TemporaryDirectory() as tmp:
+            checkpoint = Path(tmp) / "state.pt"
+            one = train_one(teacher, rank=2, steps=1, batch_size=3,
+                            itq_iterations=0, residual=False,
+                            save_state=checkpoint, refine_output_scales=True)
+            self.assertTrue(one["refine_output_scales"])
+            with self.assertRaisesRegex(TrainingError, "mismatch"):
+                train_one(teacher, rank=2, steps=2, batch_size=3,
+                          itq_iterations=0, residual=False,
+                          save_state=checkpoint, resume=True,
+                          refine_output_scales=False)
+            two = train_one(teacher, rank=2, steps=2, batch_size=3,
+                            itq_iterations=0, residual=False,
+                            save_state=checkpoint, resume=True,
+                            refine_output_scales=True)
+            self.assertEqual(two["resumed_from_step"], 1)
 
     def test_rejects_teacher_shape_mismatch(self):
         model = toy_model()
