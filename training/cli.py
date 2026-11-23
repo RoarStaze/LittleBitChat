@@ -302,6 +302,11 @@ def run_activation_calibration(args):
         args.activation_data, teacher, layer=args.layer,
         projection=args.projection, max_mib=args.max_activation_mib,
         require_token_disjoint=args.require_token_disjoint)
+    source_replay = {"source_reconstruction_verified":False}
+    if bundle.token_disjoint_verified:
+        from .layer0_capture import verify_token_disjoint_source
+        source_replay=verify_token_disjoint_source(
+            args.checkpoint,bundle,layer=args.layer,projection=args.projection)
     model = LittleBitQAT.from_teacher(
         teacher, rank=rank, residual=not args.no_residual,
         itq_iterations=args.itq_iterations, seed=args.seed,
@@ -354,6 +359,7 @@ def run_activation_calibration(args):
         "token_disjoint_required": args.require_token_disjoint,
         "unique_token_counts": bundle.unique_token_counts,
         "split_method": bundle.metadata["split_method"],
+        **source_replay,
         "calibration_samples": int(bundle.calibration.shape[0]),
         "selection_samples": int(bundle.selection.shape[0]),
         "audit_samples": int(bundle.audit.shape[0]),
@@ -432,6 +438,11 @@ def main(argv=None):
                 args.activation_data,teacher,layer=args.layer,
                 projection=args.projection,max_mib=args.max_activation_mib,
                 require_token_disjoint=args.require_token_disjoint)
+            source_replay={"source_reconstruction_verified":False}
+            if bundle.token_disjoint_verified:
+                from .layer0_capture import verify_token_disjoint_source
+                source_replay=verify_token_disjoint_source(
+                    args.checkpoint,bundle,layer=args.layer,projection=args.projection)
             print(json.dumps({
                 "status":"ACTIVATION_CAPTURE_AUDITED",
                 "teacher_sha256":_teacher_sha(teacher),
@@ -445,6 +456,7 @@ def main(argv=None):
                     "selection":len(bundle.selection),
                     "audit":len(bundle.audit)},
                 "capture_method":bundle.metadata["capture_method"],
+                **source_replay,
                 "source_provenance_independently_verified":False,
                 "full_model_trained":False,
                 "training_was_run":False,
