@@ -54,6 +54,33 @@ class FrozenAuditTests(unittest.TestCase):
             sample_seed=seed,audit_seed=20261122,
             source_text_file=source,allow_test_shapes=True)
 
+    def test_accepts_shorter_original_tokenizer_and_skips_embedding_padding(self):
+        # Gemma 3's model embedding row count may include non-tokenizer
+        # padding rows; the original tokenizer's IDs remain the only valid
+        # vocabulary to sample.
+        self.tokenizer.vocab_size=250
+        out=self.root/"padded.safetensors"
+        report=self.capture(out)
+        self.assertEqual(report["status"],"FROZEN_TOKEN_AUDIT_CAPTURE")
+        self.assertEqual(report["unique_token_counts"],
+                         {"calibration":48,"selection":24,"audit":24})
+        bundle=load_activation_bundle(out,self.teacher.float(),layer=0,
+                                      projection="self_attn.q_proj",
+                                      require_token_disjoint=True)
+        all_ids=set().union(*(set(v.tolist()) for v in bundle.token_ids.values()))
+        self.assertTrue(all(x<250 for x in all_ids))
+        self.assertTrue(report["source_reconstruction_verified"])
+        self.assertTrue(report["frozen_audit_verified"])
+
+    def test_refuses_tokenizer_larger_or_significantly_shorter_than_embeddings(self):
+        for count in (257,100,0,True):
+            with self.subTest(tokenizer_size=count):
+                self.tokenizer.vocab_size=count
+                with self.assertRaisesRegex(FrozenAuditError,
+                                            "Tokenizer|tokenizer|embedding|vocabulary"):
+                    self.capture(self.root/f"refused_{count}.safetensors")
+                self.assertFalse(self.lock.exists())
+
     def test_creates_large_disjoint_capture_and_immutable_audit_lock(self):
         out=self.root/"first.safetensors"
         report=self.capture(out)

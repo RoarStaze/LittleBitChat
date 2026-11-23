@@ -16,7 +16,13 @@ population estimate. Here the default capture measures **2,048 fit**,
 
 With the default **uniform tokenizer vocabulary type sampling**, every
 eligible distinct tokenizer ID receives equal sampling weight, regardless
-of its natural language frequency. All known `<...>` control, reserved
+of its natural language frequency. The original Gemma 3 embedding table
+may have extra padded rows beyond the actual tokenizer vocabulary;
+these padded rows are never sampled. Capture reports
+`tokenizer_vocab_size`, `embedding_vocab_rows`, and
+`embedding_padding_rows_excluded`. A tokenizer larger than the
+embedding table, or one with an implausibly large size mismatch, is
+rejected with both counts in the error. All known `<...>` control, reserved
 and image-token IDs are excluded. This is **broad coverage of token
 types**, not a representative text-use distribution. For a more natural
 candidate pool, explicitly provide `--source-text-file path-to-local-corpus.txt`;

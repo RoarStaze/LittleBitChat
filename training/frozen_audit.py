@@ -54,13 +54,25 @@ def _rank_key(token, seed, purpose):
 def _source_token_pool(tokenizer, *, vocab_size, source_text_file=None):
     """Return valid, normal vocabulary IDs and a tokenizer/source digest."""
     backend=getattr(tokenizer,"backend",None)
+    tokenizer_size=getattr(tokenizer,"vocab_size",None)
+    # Gemma 3 can have 262208 embedding rows while its tokenizer exposes
+    # fewer token IDs. The remainder are model-side padded rows, NOT valid
+    # tokenizer IDs, and must never enter the audit sampling pool.
+    # Allow only a small padding difference; do not accept an arbitrary
+    # smaller tokenizer or any tokenizer with IDs outside the matrix.
+    max_padding=min(256,max(8,vocab_size // 100))
     if (backend is None or not hasattr(backend,"id_to_token")
-            or getattr(tokenizer,"vocab_size",None) != vocab_size):
+            or type(tokenizer_size) is not int
+            or not 0 < tokenizer_size <= vocab_size
+            or vocab_size-tokenizer_size > max_padding):
         raise FrozenAuditError(
-            "Matching original Gemma tokenizer with full embedding-sized vocabulary required")
+            "Incompatible tokenizer/embedding vocabulary: "
+            f"tokenizer_ids={tokenizer_size}, embedding_rows={vocab_size}, "
+            f"maximum_supported_padding={max_padding}. "
+            "Use the exact original Gemma tokenizer.json.")
     h=hashlib.sha256()
     valid=set()
-    for tid in range(vocab_size):
+    for tid in range(tokenizer_size):
         token=backend.id_to_token(tid)
         if not isinstance(token,str) or not token:
             continue
@@ -378,6 +390,9 @@ def capture_vocabulary_checkpoint(
         "split_method":"disjoint_token_ids_v1",
         "unique_token_counts":{k:len(v) for k,v in ids.items()},
         "eligible_token_type_count":len(pool),
+        "tokenizer_vocab_size":tokenizer.vocab_size,
+        "embedding_vocab_rows":e_shape[0],
+        "embedding_padding_rows_excluded":e_shape[0]-tokenizer.vocab_size,
         "source_sampling":source_label,
         "source_text_sha256":source_sha,
         "full_model_required":False,
