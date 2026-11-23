@@ -147,6 +147,29 @@ class FrozenAuditTests(unittest.TestCase):
             verify_frozen_audit_lock(bundle,self.lock,modified,
                                      layer=0,projection="self_attn.q_proj")
 
+    def test_external_fingerprint_rejects_replaced_lock(self):
+        path=self.root/"frozen_capture.safetensors"
+        report=self.capture(path)
+        bundle=load_activation_bundle(
+            path,self.teacher.float(),layer=0,projection="self_attn.q_proj",
+            require_token_disjoint=True)
+        good=report["frozen_audit_lock_sha256"]
+        matched=verify_frozen_audit_lock(
+            bundle,self.lock,self.teacher.float(),layer=0,
+            projection="self_attn.q_proj",expected_sha256=good)
+        self.assertEqual(matched["frozen_audit_lock_sha256"],good)
+        with self.assertRaisesRegex(FrozenAuditError,"expected|fingerprint"):
+            verify_frozen_audit_lock(
+                bundle,self.lock,self.teacher.float(),layer=0,
+                projection="self_attn.q_proj",expected_sha256="0"*64)
+        with self.assertRaisesRegex(FrozenAuditError,"expected|fingerprint"):
+            capture_vocabulary_checkpoint(
+                self.ckpt,out=self.root/"denied_again.safetensors",
+                audit_lock=self.lock,tokenizer=self.tokenizer,
+                calibration_tokens=48,selection_tokens=24,audit_tokens=24,
+                allow_test_shapes=True,expected_audit_lock_sha256="0"*64)
+        self.assertFalse((self.root/"denied_again.safetensors").exists())
+
     def test_restricts_special_token_ids_and_small_pools(self):
         with self.assertRaisesRegex(FrozenAuditError,"insufficient|unique|eligible"):
             capture_vocabulary_checkpoint(
