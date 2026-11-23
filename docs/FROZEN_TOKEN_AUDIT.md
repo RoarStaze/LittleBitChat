@@ -46,8 +46,11 @@ full original tokenizer vocabulary digest, the set of audit IDs, and
 the exact source-reconstructed audit activation bytes. Its own SHA-256
 is included in the capture metadata and result JSON. Preserve a copy of
 the lock and its reported SHA-256 in a trusted place outside experimental
-output directories; the same untrusted local filesystem cannot defend
-against an attacker editing both lock and capture.
+output directories. In subsequent commands, use
+`--expected-audit-lock-sha256 <the-original-64-character-hash>` to
+**pin** that fingerprint independently. This is optional but strongly
+recommended: without an external trusted SHA, the same untrusted
+filesystem cannot defend against an attacker editing both lock and capture.
 
 Change only `--sample-seed` and output filename to make a new
 calibration/selection sample that preserves the exact frozen audit:
