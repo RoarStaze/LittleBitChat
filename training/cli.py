@@ -314,6 +314,9 @@ def run_activation_calibration(args):
     )
     from .layer_train import LittleBitQAT, estimated_effective_bits, _teacher_sha
 
+    if (args.expected_audit_lock_sha256 is not None
+            and args.frozen_audit_lock is None):
+        raise TrainingError("--expected-audit-lock-sha256 requires --frozen-audit-lock")
     if (type(args.max_bpw) not in (int, float) or
             not math.isfinite(args.max_bpw) or not 0 < args.max_bpw <= 16):
         raise TrainingError("max-bpw must be in (0,16]")
@@ -494,6 +497,10 @@ def main(argv=None):
             from .capture_cli import run_capture
             print(json.dumps(run_capture(args), indent=2))
         elif args.mode == "activation-audit":
+            if (args.expected_audit_lock_sha256 is not None
+                    and args.frozen_audit_lock is None):
+                raise TrainingError(
+                    "--expected-audit-lock-sha256 requires --frozen-audit-lock")
             from .activation_calibration import load_activation_bundle
             from .layer_train import _teacher_sha
             teacher=load_projection(args.checkpoint,layer=args.layer,
