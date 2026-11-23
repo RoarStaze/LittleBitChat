@@ -131,6 +131,8 @@ def parser():
     vocabulary.add_argument("--source-text-file",type=Path,default=None,
                              help="Optional local corpus; otherwise sample uniformly from tokenizer vocabulary")
     vocabulary.add_argument("--max-teacher-mib",type=int,default=512)
+    vocabulary.add_argument("--expected-audit-lock-sha256",default=None,
+                            help="Optional out-of-band trusted SHA-256 pin of frozen audit lock")
     vocabulary.add_argument("--allow-test-shapes",action="store_true",
                              help="Only for small synthetic unit-test fixtures")
 
@@ -179,6 +181,8 @@ def parser():
                                  "validate before running SVD")
     activation.add_argument("--frozen-audit-lock",type=Path,default=None,
                             help="Bind independent audit rows to never-overwritten reference lock")
+    activation.add_argument("--expected-audit-lock-sha256",default=None,
+                            help="Optional out-of-band trusted audit lock fingerprint")
 
     token_audit=commands.add_parser(
         "activation-audit",
@@ -189,6 +193,7 @@ def parser():
     token_audit.add_argument("--projection",choices=PROJECTIONS,required=True)
     token_audit.add_argument("--require-token-disjoint",action="store_true")
     token_audit.add_argument("--frozen-audit-lock",type=Path,default=None)
+    token_audit.add_argument("--expected-audit-lock-sha256",default=None)
     token_audit.add_argument("--max-teacher-mib",type=int,default=512)
     token_audit.add_argument("--max-activation-mib",type=int,default=256)
 
@@ -336,7 +341,8 @@ def run_activation_calibration(args):
         from .frozen_audit import verify_frozen_audit_lock
         frozen=verify_frozen_audit_lock(
             bundle,args.frozen_audit_lock,teacher,
-            layer=args.layer,projection=args.projection)
+            layer=args.layer,projection=args.projection,
+            expected_sha256=args.expected_audit_lock_sha256)
     model = LittleBitQAT.from_teacher(
         teacher, rank=rank, residual=not args.no_residual,
         itq_iterations=args.itq_iterations, seed=args.seed,
@@ -469,7 +475,8 @@ def main(argv=None):
                 audit_tokens=args.audit_tokens,sample_seed=args.sample_seed,
                 audit_seed=args.audit_seed,source_text_file=args.source_text_file,
                 max_teacher_mib=args.max_teacher_mib,
-                allow_test_shapes=args.allow_test_shapes),indent=2))
+                allow_test_shapes=args.allow_test_shapes,
+                expected_audit_lock_sha256=args.expected_audit_lock_sha256),indent=2))
         elif args.mode == "diagnose":
             from .diagnose import diagnose_projection
             report = diagnose_projection(
@@ -501,7 +508,8 @@ def main(argv=None):
                 from .frozen_audit import verify_frozen_audit_lock
                 frozen=verify_frozen_audit_lock(
                     bundle,args.frozen_audit_lock,teacher,
-                    layer=args.layer,projection=args.projection)
+                    layer=args.layer,projection=args.projection,
+                    expected_sha256=args.expected_audit_lock_sha256)
             source_replay={"source_reconstruction_verified":False}
             if bundle.token_disjoint_verified:
                 from .layer0_capture import verify_token_disjoint_source
