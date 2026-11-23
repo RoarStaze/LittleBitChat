@@ -13,7 +13,7 @@ from safetensors.torch import load_file, save_file
 from training.activation_calibration import ActivationDataError, load_activation_bundle
 from training.layer0_capture import capture_layer0_from_original_weights, Layer0CaptureError
 from training.tests.test_layer0_capture import Layer0CaptureTests, EMBED, NORM, Q
-from training.token_disjoint import select_token_disjoint_ids
+from training.token_disjoint import select_token_disjoint_ids, TokenDisjointError
 
 ROOT=Path(__file__).resolve().parents[2]
 
@@ -57,11 +57,11 @@ class TokenPartitionTests(unittest.TestCase):
         self.assertEqual(ids,repeat["ids"])
 
     def test_fail_closed_if_any_split_lacks_unique_tokens(self):
-        with self.assertRaisesRegex(Layer0CaptureError,"unique|token-disjoint|more"):
+        with self.assertRaisesRegex(TokenDisjointError,"unique|token-disjoint|more"):
             select_token_disjoint_ids(
                 self.tokenizer,self.groups,max_tokens=64,max_rows=64,
                 min_unique_tokens=64,vocab_size=256)
-        with self.assertRaisesRegex(Layer0CaptureError,"min_unique_tokens"):
+        with self.assertRaisesRegex(TokenDisjointError,"min_unique_tokens"):
             select_token_disjoint_ids(
                 self.tokenizer,self.groups,max_tokens=64,max_rows=16,
                 min_unique_tokens=15,vocab_size=256)
