@@ -189,6 +189,30 @@ class CaptureAndValidationTests(unittest.TestCase):
         self.assertNotEqual(result.returncode,0)
         self.assertRegex(result.stderr,"reconstruction|match|mismatch|source")
 
+    def test_strict_source_replay_rejects_changed_norm_without_changing_teacher(self):
+        path,_=self._capture()
+        # Original teacher Q projection is unchanged: the capture's SHA
+        # still matches. Replay must independently verify the norm weights.
+        norm=self.norm.clone().float()
+        changed=norm.add(0.125).bfloat16()
+        save_file({NORM:changed,Q:self.teacher},
+                  str(self.ckpt/"layer.safetensors"))
+        cmd=[sys.executable,str(ROOT/"littlebitchat.py"),"train","activation-audit",
+             "--checkpoint",str(self.ckpt),"--activation-data",str(path),
+             "--layer","0","--projection","self_attn.q_proj",
+             "--require-token-disjoint"]
+        p=subprocess.run(cmd,cwd=ROOT,capture_output=True,text=True,timeout=35)
+        self.assertNotEqual(p.returncode,0)
+        self.assertRegex(p.stderr,"reconstruction|mismatch")
+
+    def test_strict_command_flags_are_available(self):
+        result=subprocess.run([sys.executable,str(ROOT/"littlebitchat.py"),"train",
+                               "capture-layer0","--help"],cwd=ROOT,
+                              capture_output=True,text=True,timeout=25)
+        self.assertEqual(result.returncode,0,result.stderr)
+        self.assertIn("--token-disjoint",result.stdout)
+        self.assertIn("--min-unique-tokens",result.stdout)
+
     def test_strict_calibration_and_read_only_audit_cli(self):
         path,report=self._capture()
         audit=subprocess.run([
@@ -199,6 +223,8 @@ class CaptureAndValidationTests(unittest.TestCase):
         self.assertEqual(audit.returncode,0,audit.stderr)
         a=json.loads(audit.stdout)
         self.assertTrue(a["token_disjoint_verified"])
+        self.assertTrue(a["source_reconstruction_verified"])
+        self.assertEqual(a["source_reconstruction_token_rows_checked"],48)
         self.assertEqual(a["unique_token_counts"]["audit"],16)
         dest=self.root/"trained"
         result=subprocess.run([
@@ -212,6 +238,7 @@ class CaptureAndValidationTests(unittest.TestCase):
         stats=json.loads(result.stdout)
         self.assertTrue(stats["same_bpw_verified"])
         self.assertTrue(stats["token_disjoint_verified"])
+        self.assertTrue(stats["source_reconstruction_verified"])
         self.assertTrue(stats["packed_inference_verified"])
         self.assertEqual(stats["unique_token_counts"]["audit"],16)
 
