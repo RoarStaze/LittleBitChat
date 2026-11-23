@@ -153,6 +153,29 @@ The explicit allow-unverified-checkpoint flag acknowledges **tensor names and sh
 
 **Unverified limitations:** The full 27B path has not been executed with authentic trained weights. Performance, text quality, model-wide numerical parity and measured process peak RAM/VRAM are unknown. FP32 K/V, per-token reloading of every decoder block, repeated KV concatenation, and repeated streaming of tied embeddings may be extremely slow. CuPy private pool caps are not whole-process VRAM limits. Vision encoder and multimodal features are not supported. The default 4096-token budget allocates planned capacity of 5 GiB VRAM and ~8.13 GiB RAM, but **does not prove the model fits**.
 
+## Large-scale, frozen-audit layer-0 token validation
+
+`train capture-vocabulary` samples **2,048 / 1,024 / 1,024** unique
+calibration/selection/audit token IDs by default, from the original
+local Gemma 3 tokenizer vocabulary. It reconstructs exact layer-0
+embedding/RMSNorm inputs without loading the 27B model, and **creates
+a never-overwritten frozen audit lock** recording teacher and tokenizer
+bindings, selected audit IDs, exact audit activation hash and a
+reusable SHA-256 lock digest. On subsequent captures, changing only
+`--sample-seed` can alter fit/selection IDs but **not the locked audit**.
+
+`train activation-audit --frozen-audit-lock ...` verifies the frozen
+lock and replays all labeled activations against original local weights.
+`train activation-calibrate --frozen-audit-lock ...` preserves
+selection-only acceptance/fallback and fixed BPW; after selection it
+reports a deterministic paired 95% bootstrap interval for the
+held-out audit improvement. The interval describes uniformly sampled
+**token types**, not natural-language frequency, full-model quality
+or guaranteed cross-domain generalization. An optional
+`--source-text-file` restricts the sampled token types to local text.
+
+[Freeze, verify and evaluate 4,096 disjoint token embeddings](docs/FROZEN_TOKEN_AUDIT.md).
+
 ## Token-disjoint validation at identical BPW (experimental)
 
 For Gemma layer-0 attention, the same token ID produces the same input
