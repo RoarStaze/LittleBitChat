@@ -113,6 +113,27 @@ def parser():
     lightweight.add_argument("--token-split-seed",type=int,default=42,
                              help="Deterministic ID sampling seed")
 
+    vocabulary=commands.add_parser(
+        "capture-vocabulary",
+        help="Large-scale original Gemma tokenizer-type capture with frozen SHA-256 audit lock")
+    vocabulary.add_argument("--checkpoint",type=Path,required=True)
+    vocabulary.add_argument("--tokenizer",type=Path,default=None)
+    vocabulary.add_argument("--layer",type=int,default=0)
+    vocabulary.add_argument("--projection",choices=(
+        "self_attn.q_proj","self_attn.k_proj","self_attn.v_proj"),default="self_attn.q_proj")
+    vocabulary.add_argument("--out",type=Path,required=True)
+    vocabulary.add_argument("--frozen-audit-lock",type=Path,required=True)
+    vocabulary.add_argument("--calibration-tokens",type=int,default=2048)
+    vocabulary.add_argument("--selection-tokens",type=int,default=1024)
+    vocabulary.add_argument("--audit-tokens",type=int,default=1024)
+    vocabulary.add_argument("--sample-seed",type=int,default=42)
+    vocabulary.add_argument("--audit-seed",type=int,default=20261122)
+    vocabulary.add_argument("--source-text-file",type=Path,default=None,
+                             help="Optional local corpus; otherwise sample uniformly from tokenizer vocabulary")
+    vocabulary.add_argument("--max-teacher-mib",type=int,default=512)
+    vocabulary.add_argument("--allow-test-shapes",action="store_true",
+                             help="Only for small synthetic unit-test fixtures")
+
     capture = commands.add_parser(
         "capture-activations",
         help="Explicitly load COMPLETE original Gemma 3 checkpoint and capture real "
@@ -156,6 +177,8 @@ def parser():
     activation.add_argument("--require-token-disjoint",action="store_true",
                             help="Reject old prompt-only capture or any repeated token IDs; "
                                  "validate before running SVD")
+    activation.add_argument("--frozen-audit-lock",type=Path,default=None,
+                            help="Bind independent audit rows to never-overwritten reference lock")
 
     token_audit=commands.add_parser(
         "activation-audit",
@@ -165,6 +188,7 @@ def parser():
     token_audit.add_argument("--layer",type=int,required=True)
     token_audit.add_argument("--projection",choices=PROJECTIONS,required=True)
     token_audit.add_argument("--require-token-disjoint",action="store_true")
+    token_audit.add_argument("--frozen-audit-lock",type=Path,default=None)
     token_audit.add_argument("--max-teacher-mib",type=int,default=512)
     token_audit.add_argument("--max-activation-mib",type=int,default=256)
 
@@ -301,12 +325,18 @@ def run_activation_calibration(args):
     bundle = load_activation_bundle(
         args.activation_data, teacher, layer=args.layer,
         projection=args.projection, max_mib=args.max_activation_mib,
-        require_token_disjoint=args.require_token_disjoint)
+        require_token_disjoint=args.require_token_disjoint or bool(args.frozen_audit_lock))
     source_replay = {"source_reconstruction_verified":False}
     if bundle.token_disjoint_verified:
         from .layer0_capture import verify_token_disjoint_source
         source_replay=verify_token_disjoint_source(
             args.checkpoint,bundle,layer=args.layer,projection=args.projection)
+    frozen={}
+    if args.frozen_audit_lock is not None:
+        from .frozen_audit import verify_frozen_audit_lock
+        frozen=verify_frozen_audit_lock(
+            bundle,args.frozen_audit_lock,teacher,
+            layer=args.layer,projection=args.projection)
     model = LittleBitQAT.from_teacher(
         teacher, rank=rank, residual=not args.no_residual,
         itq_iterations=args.itq_iterations, seed=args.seed,
@@ -318,9 +348,21 @@ def run_activation_calibration(args):
         from .binary_refinement import refine_binary_signs
         refine_binary_signs(model, teacher, channels=args.binary_refine_channels,
                             passes=args.binary_refine_passes)
+    # Only selection data may decide acceptance. The frozen audit is
+    # evaluated descriptively AFTER the selection decision.
+    before_errors=None
+    if frozen:
+        with torch.no_grad():
+            before_errors=(model(bundle.audit)-bundle.audit @ teacher.float().t()).detach()
     result = calibrate_activation_scales(
         model, teacher, bundle.calibration, bundle.selection, bundle.audit,
         min_relative_improvement=args.min_relative_improvement)
+    bootstrap={}
+    if frozen:
+        from .frozen_audit import paired_audit_bootstrap
+        with torch.no_grad():
+            after_errors=(model(bundle.audit)-bundle.audit @ teacher.float().t()).detach()
+        bootstrap=paired_audit_bootstrap(before_errors,after_errors)
     if result["estimated_effective_bpw"] != target_bpw:
         raise TrainingError("Activation candidate changed effective BPW")
 
@@ -360,6 +402,8 @@ def run_activation_calibration(args):
         "unique_token_counts": bundle.unique_token_counts,
         "split_method": bundle.metadata["split_method"],
         **source_replay,
+        **frozen,
+        **bootstrap,
         "calibration_samples": int(bundle.calibration.shape[0]),
         "selection_samples": int(bundle.selection.shape[0]),
         "audit_samples": int(bundle.audit.shape[0]),
@@ -412,6 +456,20 @@ def main(argv=None):
                 token_disjoint=args.token_disjoint,
                 min_unique_tokens=args.min_unique_tokens,
                 token_split_seed=args.token_split_seed),indent=2))
+        elif args.mode == "capture-vocabulary":
+            from .frozen_audit import capture_vocabulary_checkpoint
+            from chat_tokenizer import GemmaChatTokenizer
+            tokenizer_path=args.tokenizer or args.checkpoint/"tokenizer.json"
+            tokenizer=GemmaChatTokenizer(tokenizer_path=tokenizer_path)
+            print(json.dumps(capture_vocabulary_checkpoint(
+                args.checkpoint,out=args.out,audit_lock=args.frozen_audit_lock,
+                tokenizer=tokenizer,layer=args.layer,projection=args.projection,
+                calibration_tokens=args.calibration_tokens,
+                selection_tokens=args.selection_tokens,
+                audit_tokens=args.audit_tokens,sample_seed=args.sample_seed,
+                audit_seed=args.audit_seed,source_text_file=args.source_text_file,
+                max_teacher_mib=args.max_teacher_mib,
+                allow_test_shapes=args.allow_test_shapes),indent=2))
         elif args.mode == "diagnose":
             from .diagnose import diagnose_projection
             report = diagnose_projection(
@@ -437,7 +495,13 @@ def main(argv=None):
             bundle=load_activation_bundle(
                 args.activation_data,teacher,layer=args.layer,
                 projection=args.projection,max_mib=args.max_activation_mib,
-                require_token_disjoint=args.require_token_disjoint)
+                require_token_disjoint=args.require_token_disjoint or bool(args.frozen_audit_lock))
+            frozen={}
+            if args.frozen_audit_lock is not None:
+                from .frozen_audit import verify_frozen_audit_lock
+                frozen=verify_frozen_audit_lock(
+                    bundle,args.frozen_audit_lock,teacher,
+                    layer=args.layer,projection=args.projection)
             source_replay={"source_reconstruction_verified":False}
             if bundle.token_disjoint_verified:
                 from .layer0_capture import verify_token_disjoint_source
@@ -457,6 +521,7 @@ def main(argv=None):
                     "audit":len(bundle.audit)},
                 "capture_method":bundle.metadata["capture_method"],
                 **source_replay,
+                **frozen,
                 "source_provenance_independently_verified":False,
                 "full_model_trained":False,
                 "training_was_run":False,
