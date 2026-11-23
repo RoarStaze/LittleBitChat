@@ -225,6 +225,23 @@ class FrozenAuditTests(unittest.TestCase):
         self.assertNotEqual(denied.returncode,0)
         self.assertFalse((self.root/"must_not_exist").exists())
 
+    def test_cli_external_fingerprint_requires_an_explicit_lock(self):
+        out=self.root/"invalid_without_lock"
+        base=[sys.executable,str(ROOT/"littlebitchat.py"),"train"]
+        args=["--checkpoint",str(self.ckpt),
+              "--activation-data",str(self.root/"never_exists.safetensors"),
+              "--layer","0","--projection","self_attn.q_proj",
+              "--expected-audit-lock-sha256","0"*64]
+        for mode,extra in (("activation-audit",[]),
+                           ("activation-calibrate",[
+                               "--rank","3","--no-residual","--max-bpw","16",
+                               "--out",str(out)])):
+            result=subprocess.run(base+[mode]+args+extra,cwd=ROOT,
+                                  capture_output=True,text=True,timeout=30)
+            self.assertNotEqual(result.returncode,0)
+            self.assertIn("--frozen-audit-lock",result.stderr)
+        self.assertFalse(out.exists())
+
     def test_paired_bootstrap_confidence_is_positive_for_uniform_improvement(self):
         g=torch.Generator().manual_seed(123)
         before=torch.randn(128,6,generator=g)
