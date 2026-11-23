@@ -153,7 +153,8 @@ def _load_lock(path):
     return lock,_sha(raw)
 
 
-def verify_frozen_audit_lock(bundle, audit_lock, teacher, *, layer, projection):
+def verify_frozen_audit_lock(bundle, audit_lock, teacher, *, layer, projection,
+                             expected_sha256=None):
     """Validate lock byte digest, provenance, ID labels and exact audit rows.
 
     The reference is frozen by an on-disk exclusive-create lock. The caller
@@ -162,6 +163,11 @@ def verify_frozen_audit_lock(bundle, audit_lock, teacher, *, layer, projection):
     external trusted anchor.
     """
     lock, lock_digest=_load_lock(audit_lock)
+    if expected_sha256 is not None:
+        if (not isinstance(expected_sha256,str) or len(expected_sha256)!=64
+                or any(c not in "0123456789abcdef" for c in expected_sha256)
+                or expected_sha256!=lock_digest):
+            raise FrozenAuditError("Frozen audit external expected SHA-256 fingerprint mismatch")
     if not getattr(bundle,"token_disjoint_verified",False) or bundle.token_ids is None:
         raise FrozenAuditError("Frozen audit requires strictly token-disjoint inputs")
     if (lock.get("teacher_sha256")!=_teacher_sha(teacher)
@@ -198,7 +204,8 @@ def capture_vocabulary_checkpoint(
         layer=0, projection="self_attn.q_proj",
         calibration_tokens=2048, selection_tokens=1024, audit_tokens=1024,
         sample_seed=42, audit_seed=20261122, source_text_file=None,
-        allow_test_shapes=False, max_teacher_mib=512):
+        allow_test_shapes=False, max_teacher_mib=512,
+        expected_audit_lock_sha256=None):
     """Create a LARGE, disjoint, exact original-source vocabulary capture.
 
     First run freezes the audit lock with exclusive-create, never overwrites.
@@ -304,6 +311,14 @@ def capture_vocabulary_checkpoint(
             "Existing frozen audit lock differs from reconstructed audit; refusing drift")
     lock_raw=_canonical(lock)
     lock_digest=_sha(lock_raw)
+    if expected_audit_lock_sha256 is not None:
+        if (not isinstance(expected_audit_lock_sha256,str)
+                or len(expected_audit_lock_sha256)!=64
+                or any(c not in "0123456789abcdef"
+                       for c in expected_audit_lock_sha256)
+                or expected_audit_lock_sha256!=lock_digest):
+            raise FrozenAuditError(
+                "Frozen audit external expected SHA-256 fingerprint mismatch")
     meta={
         "teacher_sha256":teacher_sha,
         "layer":"0",
@@ -344,7 +359,8 @@ def capture_vocabulary_checkpoint(
         bundle=load_activation_bundle(
             out,teacher,layer=0,projection=projection,require_token_disjoint=True)
         frozen=verify_frozen_audit_lock(
-            bundle,lock_path,teacher,layer=0,projection=projection)
+            bundle,lock_path,teacher,layer=0,projection=projection,
+            expected_sha256=expected_audit_lock_sha256)
         replay=verify_token_disjoint_source(
             root,bundle,layer=0,projection=projection)
     except Exception:
