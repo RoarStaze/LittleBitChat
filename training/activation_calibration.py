@@ -32,6 +32,9 @@ class ActivationBundle:
     metadata: dict
     activation_sha256: str
     provenance_independently_verified: bool = False
+    token_disjoint_verified: bool = False
+    unique_token_counts: dict | None = None
+    token_ids: dict | None = None
 
 
 def _valid_sha(value):
@@ -48,13 +51,16 @@ def _sample_hashes(tensor):
     }
 
 
-def load_activation_bundle(source, teacher, *, layer, projection, max_mib=256):
+def load_activation_bundle(source, teacher, *, layer, projection, max_mib=256,
+                           require_token_disjoint=False):
     """Load an explicit user-provided Safetensors forward-pre-hook capture.
 
     Binding checks prevent accidentally mixing different layer projections
     or different local teacher tensors. Declared provenance is NOT proof
     that the original language model was actually executed.
     """
+    if type(require_token_disjoint) is not bool:
+        raise ActivationDataError("require_token_disjoint must be boolean")
     if type(max_mib) is not int or not 1 <= max_mib <= 4096:
         raise ActivationDataError("max_mib must be in 1..4096")
     if type(layer) is not int or not 0 <= layer < 62:
@@ -75,16 +81,31 @@ def load_activation_bundle(source, teacher, *, layer, projection, max_mib=256):
     try:
         with safe_open(str(path), framework="pt", device="cpu") as opened:
             keys = set(opened.keys())
-            if keys != {"calibration", "selection", "audit"}:
-                raise ActivationDataError(
-                    "Activation file must contain calibration, selection and audit only")
             metadata = dict(opened.metadata() or {})
+            matrix_keys = {"calibration", "selection", "audit"}
+            split_method = metadata.get("split_method")
+            if split_method == "disjoint_prompts":
+                if require_token_disjoint:
+                    raise ActivationDataError(
+                        "Legacy prompt-disjoint capture cannot prove token-disjoint validation; "
+                        "create a new --token-disjoint capture")
+                if keys != matrix_keys:
+                    raise ActivationDataError(
+                        "Legacy capture file must contain calibration, selection and audit only")
+            elif split_method == "disjoint_token_ids_v1":
+                required_keys = matrix_keys | {
+                    "token_ids_calibration", "token_ids_selection", "token_ids_audit"}
+                if keys != required_keys:
+                    raise ActivationDataError(
+                        "Token-disjoint capture missing required token ID arrays or contains extra keys")
+            else:
+                raise ActivationDataError("Unsupported activation split method")
             expected = {
                 "teacher_sha256": _teacher_sha(teacher),
                 "layer": str(layer),
                 "projection": projection,
                 "input_module": f"language_model.model.layers.{layer}.{projection}",
-                "split_method": "disjoint_prompts",
+                "split_method": split_method,
             }
             for key, value in expected.items():
                 if metadata.get(key) != value:
@@ -115,6 +136,9 @@ def load_activation_bundle(source, teacher, *, layer, projection, max_mib=256):
                 raise ActivationDataError("Calibration/selection/audit prompt split overlap")
             arrays = {name: opened.get_tensor(name).float().contiguous()
                       for name in ("calibration", "selection", "audit")}
+            token_ids = ({name: opened.get_tensor("token_ids_"+name)
+                          for name in ("calibration", "selection", "audit")}
+                         if split_method == "disjoint_token_ids_v1" else None)
     except (OSError, RuntimeError) as exc:
         raise ActivationDataError("Unable to read activation capture: "+str(exc)) from exc
 
@@ -126,17 +150,61 @@ def load_activation_bundle(source, teacher, *, layer, projection, max_mib=256):
         if not bool(torch.isfinite(samples).all()):
             raise ActivationDataError(name+" must contain only finite activations")
 
+    # New v2 capture validates concrete token IDs, their alignment with
+    # matrix rows, and exact row-level non-overlap. Metadata alone is never
+    # trusted as evidence of independence.
+    counts = None
+    if token_ids is not None:
+        if (metadata.get("capture_method") != "gemma3_layer0_embedding_rmsnorm"
+                or layer != 0 or projection not in (
+                    "self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj")):
+            raise ActivationDataError(
+                "Token-disjoint proof is supported only for low-RAM layer-0 q/k/v captures")
+        counts={}
+        for name in ("calibration", "selection", "audit"):
+            ids=token_ids[name]
+            if (ids.ndim != 1 or ids.dtype != torch.int64
+                    or ids.shape[0] != arrays[name].shape[0]):
+                raise ActivationDataError(
+                    "Token ID row count/dtype/shape mismatch in "+name)
+            if not bool((ids >= 0).all()):
+                raise ActivationDataError("Token IDs must be nonnegative")
+            values=ids.tolist()
+            if len(values) != len(set(values)):
+                raise ActivationDataError(
+                    "Duplicate token IDs within "+name+" are not independent rows")
+            counts[name]=len(values)
+        pairs=(("calibration","selection"),("calibration","audit"),
+               ("selection","audit"))
+        for left,right in pairs:
+            if set(token_ids[left].tolist()) & set(token_ids[right].tolist()):
+                raise ActivationDataError(
+                    "Token ID overlap between "+left+" and "+right)
+        try:
+            stated=int(metadata["min_unique_tokens"])
+        except (KeyError,TypeError,ValueError) as exc:
+            raise ActivationDataError(
+                "Token-disjoint capture missing valid minimum coverage metadata") from exc
+        if not 16 <= stated <= 8192 or any(x < stated for x in counts.values()):
+            raise ActivationDataError(
+                "Token-disjoint capture fails stated minimum unique-token coverage")
     hashes = {key: _sample_hashes(samples) for key, samples in arrays.items()}
     for left, right in (("calibration", "selection"),
                         ("calibration", "audit"), ("selection", "audit")):
-        # Shared BOS/prefix token inputs can legitimately recur across
-        # disjoint prompts. Reject fully reused splits, not shared prefixes.
-        if hashes[left].issubset(hashes[right]) or hashes[right].issubset(hashes[left]):
+        overlap=hashes[left] & hashes[right]
+        if token_ids is not None:
+            if overlap:
+                raise ActivationDataError(
+                    "Identical activation rows overlap across token-disjoint splits")
+        # Preserve backward compatibility for legacy prompt-disjoint data,
+        # which can legitimately repeat common BOS/prefix token rows.
+        elif hashes[left].issubset(hashes[right]) or hashes[right].issubset(hashes[left]):
             raise ActivationDataError("Whole activation split overlap: "+left+"/"+right)
     with path.open("rb") as handle:
         digest = hashlib.file_digest(handle, "sha256").hexdigest()
-    return ActivationBundle(arrays["calibration"], arrays["selection"], arrays["audit"],
-                            metadata, digest)
+    return ActivationBundle(
+        arrays["calibration"],arrays["selection"],arrays["audit"],
+        metadata,digest,False,bool(token_ids is not None),counts,token_ids)
 
 
 @torch.no_grad()

@@ -153,6 +153,25 @@ The explicit allow-unverified-checkpoint flag acknowledges **tensor names and sh
 
 **Unverified limitations:** The full 27B path has not been executed with authentic trained weights. Performance, text quality, model-wide numerical parity and measured process peak RAM/VRAM are unknown. FP32 K/V, per-token reloading of every decoder block, repeated KV concatenation, and repeated streaming of tied embeddings may be extremely slow. CuPy private pool caps are not whole-process VRAM limits. Vision encoder and multimodal features are not supported. The default 4096-token budget allocates planned capacity of 5 GiB VRAM and ~8.13 GiB RAM, but **does not prove the model fits**.
 
+## Token-disjoint validation at identical BPW (experimental)
+
+For Gemma layer-0 attention, the same token ID produces the same input
+activation even across different prompts. The opt-in
+`train capture-layer0 --token-disjoint --min-unique-tokens 64`
+excludes all token IDs shared between three prompt groups, emits one
+activation per selected unique ID, and records aligned token IDs in a
+versioned Safetensors capture.
+
+Use `train activation-audit --require-token-disjoint` to check split
+integrity **and replay every token ID against the original local weights**.
+The strict `train activation-calibrate --require-token-disjoint` refuses
+legacy prompt-only captures or mismatched sources before expensive SVD,
+then preserves the unchanged BPW, held-out selection, independent audit
+and exact fallback policy. The original eight prompts/group likely need
+to be expanded to reach a 64-token-per-split default.
+
+[Token-disjoint capture, audit and strict calibration instructions](docs/TOKEN_DISJOINT_VALIDATION.md).
+
 ## Low-RAM capture for Gemma 3 layer 0
 
 For a 15.7 GB RAM laptop, use `train layer0-preflight` to check original

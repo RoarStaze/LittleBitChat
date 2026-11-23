@@ -106,6 +106,12 @@ def parser():
     lightweight.add_argument("--max-tokens",type=int,default=128)
     lightweight.add_argument("--max-teacher-mib",type=int,default=512)
     lightweight.add_argument("--out",type=Path,required=True)
+    lightweight.add_argument("--token-disjoint",action="store_true",
+                             help="Exclude all shared token IDs; one unique token ID per activation row")
+    lightweight.add_argument("--min-unique-tokens",type=int,default=64,
+                             help="Minimum exclusive unique tokens required per split (default 64)")
+    lightweight.add_argument("--token-split-seed",type=int,default=42,
+                             help="Deterministic ID sampling seed")
 
     capture = commands.add_parser(
         "capture-activations",
@@ -147,6 +153,20 @@ def parser():
     activation.add_argument("--binary-refine-passes", type=int, default=1)
     activation.add_argument("--refine-output-scales", action="store_true")
     activation.add_argument("--no-residual", action="store_true")
+    activation.add_argument("--require-token-disjoint",action="store_true",
+                            help="Reject old prompt-only capture or any repeated token IDs; "
+                                 "validate before running SVD")
+
+    token_audit=commands.add_parser(
+        "activation-audit",
+        help="Read-only verification of activation provenance and token ID disjointness")
+    token_audit.add_argument("--checkpoint",type=Path,required=True)
+    token_audit.add_argument("--activation-data",type=Path,required=True)
+    token_audit.add_argument("--layer",type=int,required=True)
+    token_audit.add_argument("--projection",choices=PROJECTIONS,required=True)
+    token_audit.add_argument("--require-token-disjoint",action="store_true")
+    token_audit.add_argument("--max-teacher-mib",type=int,default=512)
+    token_audit.add_argument("--max-activation-mib",type=int,default=256)
 
     preview = commands.add_parser("rank-plan",
         help="Preview physical BPW for different factor ranks without training or loading weights")
@@ -280,7 +300,13 @@ def run_activation_calibration(args):
         raise TrainingError("Rank/residual factors exceed strict max-bpw budget")
     bundle = load_activation_bundle(
         args.activation_data, teacher, layer=args.layer,
-        projection=args.projection, max_mib=args.max_activation_mib)
+        projection=args.projection, max_mib=args.max_activation_mib,
+        require_token_disjoint=args.require_token_disjoint)
+    source_replay = {"source_reconstruction_verified":False}
+    if bundle.token_disjoint_verified:
+        from .layer0_capture import verify_token_disjoint_source
+        source_replay=verify_token_disjoint_source(
+            args.checkpoint,bundle,layer=args.layer,projection=args.projection)
     model = LittleBitQAT.from_teacher(
         teacher, rank=rank, residual=not args.no_residual,
         itq_iterations=args.itq_iterations, seed=args.seed,
@@ -329,6 +355,11 @@ def run_activation_calibration(args):
         "activation_source_provenance_independently_verified": False,
         "activation_capture_claimed_method": bundle.metadata["capture_method"],
         "activation_capture_claimed_source_model": bundle.metadata["source_model"],
+        "token_disjoint_verified": bundle.token_disjoint_verified,
+        "token_disjoint_required": args.require_token_disjoint,
+        "unique_token_counts": bundle.unique_token_counts,
+        "split_method": bundle.metadata["split_method"],
+        **source_replay,
         "calibration_samples": int(bundle.calibration.shape[0]),
         "selection_samples": int(bundle.selection.shape[0]),
         "audit_samples": int(bundle.audit.shape[0]),
@@ -377,7 +408,10 @@ def main(argv=None):
                 args.checkpoint,layer=args.layer,projection=args.projection,
                 out=args.out,tokenizer=tokenizer,prompts=groups,
                 max_rows=args.max_rows,max_tokens=args.max_tokens,
-                max_teacher_mib=args.max_teacher_mib),indent=2))
+                max_teacher_mib=args.max_teacher_mib,
+                token_disjoint=args.token_disjoint,
+                min_unique_tokens=args.min_unique_tokens,
+                token_split_seed=args.token_split_seed),indent=2))
         elif args.mode == "diagnose":
             from .diagnose import diagnose_projection
             report = diagnose_projection(
@@ -394,6 +428,40 @@ def main(argv=None):
         elif args.mode == "capture-activations":
             from .capture_cli import run_capture
             print(json.dumps(run_capture(args), indent=2))
+        elif args.mode == "activation-audit":
+            from .activation_calibration import load_activation_bundle
+            from .layer_train import _teacher_sha
+            teacher=load_projection(args.checkpoint,layer=args.layer,
+                                    projection=args.projection,
+                                    max_teacher_mib=args.max_teacher_mib)
+            bundle=load_activation_bundle(
+                args.activation_data,teacher,layer=args.layer,
+                projection=args.projection,max_mib=args.max_activation_mib,
+                require_token_disjoint=args.require_token_disjoint)
+            source_replay={"source_reconstruction_verified":False}
+            if bundle.token_disjoint_verified:
+                from .layer0_capture import verify_token_disjoint_source
+                source_replay=verify_token_disjoint_source(
+                    args.checkpoint,bundle,layer=args.layer,projection=args.projection)
+            print(json.dumps({
+                "status":"ACTIVATION_CAPTURE_AUDITED",
+                "teacher_sha256":_teacher_sha(teacher),
+                "activation_sha256":bundle.activation_sha256,
+                "split_method":bundle.metadata["split_method"],
+                "token_disjoint_required":args.require_token_disjoint,
+                "token_disjoint_verified":bundle.token_disjoint_verified,
+                "unique_token_counts":bundle.unique_token_counts,
+                "rows_per_split":{
+                    "calibration":len(bundle.calibration),
+                    "selection":len(bundle.selection),
+                    "audit":len(bundle.audit)},
+                "capture_method":bundle.metadata["capture_method"],
+                **source_replay,
+                "source_provenance_independently_verified":False,
+                "full_model_trained":False,
+                "training_was_run":False,
+                "validated_language_quality":False,
+            },indent=2))
         elif args.mode == "activation-calibrate":
             print(json.dumps(run_activation_calibration(args), indent=2))
         elif args.mode == "rank-plan":
